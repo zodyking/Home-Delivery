@@ -329,3 +329,161 @@ async def parse_usps_tracking(page: Page) -> dict[str, Any]:
 
     logger.info("USPS parsed %s history events", len(events))
     return build_tracking_result(events, status, status_detail)
+
+
+ESTES_PARSE_JS = """
+() => {
+  const clean = (text) => (text || "").replace(/\\s+/g, " ").trim();
+
+  const statusCell = document.querySelector(
+    "td.mat-column-status .tbl-header-status span, td.mat-column-status span"
+  );
+  let status = clean(statusCell?.innerText || "");
+
+  // Prefer the active progress step label when present.
+  const activeStep = document.querySelector(
+    "ul.progressbar li.active .step-info, ul.progressbar li.active .active-name"
+  );
+  if (activeStep) {
+    const stepText = clean(activeStep.innerText || "");
+    if (stepText) status = stepText;
+  }
+
+  const statusDetail = clean(
+    document.querySelector(".status-block .outfordelivery span, .status-block span")
+      ?.innerText || ""
+  );
+
+  const estimated = clean(
+    document.querySelector("td.mat-column-estimatedDelivery")?.innerText || ""
+  );
+
+  const events = [];
+  document.querySelectorAll("dl.wizard dt").forEach((dt) => {
+    const title = dt.querySelector(".lastTitle, span");
+    const description = clean(title?.innerText || dt.innerText || "");
+    if (!description) return;
+
+    let date = "";
+    const dd = dt.nextElementSibling;
+    if (dd && dd.tagName === "DD") {
+      date = Array.from(dd.querySelectorAll("small"))
+        .map((el) => clean(el.innerText || ""))
+        .filter(Boolean)
+        .join(" ");
+      if (!date) date = clean(dd.innerText || "");
+    }
+
+    // Optional date group label above the wizard list
+    let groupDate = "";
+    const group = dt.closest("div")?.querySelector?.(".groupLabel");
+    if (group) groupDate = clean(group.innerText || "");
+
+    events.push({
+      date: date || groupDate,
+      description,
+      location: "",
+      status: description,
+      detail: "",
+    });
+  });
+
+  return { status, statusDetail, estimated, events };
+}
+"""
+
+
+async def expand_estes_details(page: Page) -> None:
+    """
+    Expand Estes result row + Shipment History accordion.
+
+    Flow matches My Estes UI: click the status-row chevron, then ensure
+    the Shipment History panel is open and scrolled into view.
+    """
+    # Expand the main results row via the toggle chevron column.
+    toggle = page.locator("td.mat-column-toggle, .mat-column-toggle").first
+    try:
+        if await toggle.count() > 0:
+            # Prefer clicking the down chevron when the row is collapsed.
+            down = toggle.locator(".fa-chevron-down")
+            if await down.count() > 0:
+                await down.first.click(timeout=4000)
+            else:
+                await toggle.click(timeout=4000)
+            await page.wait_for_timeout(800)
+    except Exception as exc:
+        logger.debug("Estes row expand click failed: %s", exc)
+
+    # Some builds expose a status bar chevron (image 2).
+    try:
+        status_bar = page.locator(".status-block, .tbl-header-status").first
+        if await status_bar.count() > 0:
+            await status_bar.scroll_into_view_if_needed()
+    except Exception:
+        pass
+
+    # Open Shipment History expansion panel if collapsed.
+    history_opened = await page.evaluate(
+        """() => {
+          const headers = Array.from(
+            document.querySelectorAll("mat-expansion-panel-header, .mat-expansion-panel-header")
+          );
+          const history = headers.find((el) =>
+            /shipment history/i.test(el.innerText || el.textContent || "")
+          );
+          if (!history) return "none";
+          const panel = history.closest("mat-expansion-panel, .mat-expansion-panel");
+          const expanded =
+            history.classList.contains("mat-expanded") ||
+            history.getAttribute("aria-expanded") === "true" ||
+            panel?.classList?.contains("mat-expanded");
+          if (expanded) return "already";
+          history.click();
+          return "clicked";
+        }"""
+    )
+    logger.debug("Estes history expand state: %s", history_opened)
+    if history_opened == "clicked":
+        await page.wait_for_timeout(1000)
+
+    # Scroll history into view for lazy render.
+    try:
+        history = page.get_by_text("Shipment History", exact=False).first
+        if await history.count() > 0:
+            await history.scroll_into_view_if_needed()
+            await page.wait_for_timeout(400)
+    except Exception:
+        pass
+
+    try:
+        await page.wait_for_selector("dl.wizard dt, .status-block span", timeout=8000)
+    except Exception:
+        pass
+
+
+async def parse_estes_tracking(page: Page) -> dict[str, Any]:
+    """Expand Estes details and parse shipment history events."""
+    await expand_estes_details(page)
+
+    parsed = await page.evaluate(ESTES_PARSE_JS)
+    events = parsed.get("events") or []
+    status = (parsed.get("status") or "").strip()
+    status_detail = (parsed.get("statusDetail") or "").strip()
+    estimated = (parsed.get("estimated") or "").strip()
+
+    if not events and status:
+        events = [{
+            "date": "",
+            "description": status_detail or status,
+            "location": "",
+            "status": status,
+            "detail": status_detail,
+        }]
+
+    if estimated and status_detail:
+        status_detail = f"{status_detail} · ETA {estimated}"
+    elif estimated and not status_detail:
+        status_detail = f"ETA {estimated}"
+
+    logger.info("Estes parsed %s history events (status=%s)", len(events), status or "?")
+    return build_tracking_result(events, status, status_detail)

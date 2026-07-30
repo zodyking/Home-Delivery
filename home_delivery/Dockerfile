@@ -4,11 +4,13 @@ ARG BUILD_FROM=ghcr.io/hassio-addons/debian-base:9.2.0
 # Stage 1: Addon image with Python and Playwright
 FROM ${BUILD_FROM}
 
-# Install Python and dependencies for Playwright
+# Install Python, Playwright deps, and Tesseract for letter OCR
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 \
     python3-pip \
     python3-venv \
+    tesseract-ocr \
+    tesseract-ocr-eng \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

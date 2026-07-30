@@ -184,6 +184,23 @@ async def _poll_mail() -> None:
                     last_error=None,
                 )
                 try:
+                    await config_store.upsert_mail_history_day({
+                        "date": result.get("date") or datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+                        "mailpiece_count": result.get("mailpiece_count", piece_count),
+                        "package_count": result.get("package_count", 0),
+                        "piece_count": piece_count,
+                        "letters": result.get("letters") or [],
+                        "preview_images": result.get("preview_images") or [],
+                        "tracking_numbers": result.get("tracking_numbers") or [],
+                        "account_id": account["id"],
+                    })
+                except Exception as hist_exc:
+                    logger.warning(
+                        "Failed to upsert mail history for %s: %s",
+                        account.get("label"),
+                        hist_exc,
+                    )
+                try:
                     from mail.discover_packages import add_discovered_packages
 
                     await add_discovered_packages(

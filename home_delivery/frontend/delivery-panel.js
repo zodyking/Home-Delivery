@@ -33,6 +33,10 @@ class HomeDeliveryPanel extends HTMLElement {
     this._mailSyncAccountId = null;
     this._carouselTimers = [];
     this._dashboardSettled = false;
+    this._mailHistory = [];
+    this._historyLoading = false;
+    this._historySelectedDate = null;
+    this._historyMonth = null; // Date at first of visible month
   }
 
   get _isNarrow() {
@@ -675,6 +679,7 @@ class HomeDeliveryPanel extends HTMLElement {
       usps: { bg: "#004B87", text: "#fff", label: "USPS" },
       ups: { bg: "#351C15", text: "#FFB500", label: "UPS" },
       fedex: { bg: "#4D148C", text: "#FF6600", label: "FedEx" },
+      estes: { bg: "#111111", text: "#FFD200", label: "Estes" },
     };
     const c = colors[carrier] || { bg: "#666", text: "#fff", label: carrier?.toUpperCase() || "?" };
     return `<span class="carrier-badge" style="background:${c.bg};color:${c.text}">${c.label}</span>`;
@@ -738,13 +743,15 @@ class HomeDeliveryPanel extends HTMLElement {
     await this._saveSettings({ silent: true });
   }
 
-  async _syncMail(accountId = null) {
+  async _syncMail(accountId = null, { includeHistory = false } = {}) {
     this._mailSyncing = true;
     this._mailSyncAccountId = accountId;
     this._render();
     try {
       await this._saveSettings({ silent: true });
-      const body = accountId ? { account_id: accountId } : {};
+      const body = {};
+      if (accountId) body.account_id = accountId;
+      if (includeHistory) body.include_history = true;
       const resp = await this._fetchApi("/api/mail/sync", {
         method: "POST",
         body: JSON.stringify(body),
@@ -758,6 +765,9 @@ class HomeDeliveryPanel extends HTMLElement {
 
       const packagesResp = await this._fetchApi("/api/packages");
       this._packages = packagesResp.packages || [];
+      if (includeHistory || resp.history_days) {
+        await this._loadMailHistory({ silent: true });
+      }
 
       const discovered = (resp.results || []).reduce((n, r) => n + (r.discovered_packages || 0), 0);
       const failed = (resp.results || []).filter(r => !r.success);
@@ -768,10 +778,13 @@ class HomeDeliveryPanel extends HTMLElement {
           (mailResp.accounts || []).find((a) => a.id === accountId)
             || this._getHomeMailAccount(mailResp.accounts || [])
         ));
+        const histNote = resp.history_days
+          ? `; ${resp.history_days} history day${resp.history_days === 1 ? "" : "s"} loaded`
+          : "";
         this._showToast(
           discovered > 0
-            ? `Synced — ${summary}; ${discovered} package${discovered === 1 ? "" : "s"} auto-discovered`
-            : `Synced — ${summary}`
+            ? `Synced — ${summary}; ${discovered} package${discovered === 1 ? "" : "s"} auto-discovered${histNote}`
+            : `Synced — ${summary}${histNote}`
         );
       }
     } catch (err) {
@@ -781,6 +794,38 @@ class HomeDeliveryPanel extends HTMLElement {
       this._mailSyncAccountId = null;
       this._render();
     }
+  }
+
+  async _loadMailHistory({ silent = false } = {}) {
+    this._historyLoading = true;
+    if (!silent) this._render();
+    try {
+      const resp = await this._fetchApi("/api/mail/history");
+      this._mailHistory = resp.days || [];
+      if (!this._historyMonth) {
+        const now = new Date();
+        this._historyMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+      }
+    } catch (err) {
+      if (!silent) this._showToast(err.message || "Failed to load mail history", { error: true });
+    } finally {
+      this._historyLoading = false;
+      if (!silent) this._render();
+    }
+  }
+
+  async _openMailHistory() {
+    this._historySelectedDate = null;
+    this._navigateTo("history");
+    await this._loadMailHistory();
+  }
+
+  _historyDayMap() {
+    const map = {};
+    for (const day of this._mailHistory || []) {
+      if (day?.date) map[day.date] = day;
+    }
+    return map;
   }
 
   // ============================================================================
@@ -1080,6 +1125,7 @@ class HomeDeliveryPanel extends HTMLElement {
         });
       }
 
+      const wasEmpty = !isEdit && accounts.length === 1;
       this._settings.mail = { accounts };
       await this._persistMailAccounts();
       this._mailAccountModal = null;
@@ -1087,6 +1133,11 @@ class HomeDeliveryPanel extends HTMLElement {
       this._mailState = mailResp;
       this._render();
       this._showToast(isEdit ? "Address updated" : "Address added");
+      // First address setup: sync today + pull last 30 days of digests.
+      if (wasEmpty) {
+        const newId = accounts[accounts.length - 1]?.id;
+        await this._syncMail(newId, { includeHistory: true });
+      }
     } catch (err) {
       modal.submitting = false;
       this._render();
@@ -1117,6 +1168,21 @@ class HomeDeliveryPanel extends HTMLElement {
       `;
       this._bindEvents();
       this._attachSettingsHandlers();
+      return;
+    }
+
+    if (this._currentView === "history") {
+      s.innerHTML = `
+        <style>${this._getStyles()}</style>
+        <div class="settings-view ${this._isNarrow ? "narrow" : ""} ${this._isHaEmbedded() ? "ha-embedded" : ""}">
+          ${this._renderHistoryMenubar()}
+          <div class="settings-body">
+            ${this._renderHistoryContent()}
+          </div>
+        </div>
+      `;
+      this._bindEvents();
+      this._initMailCarousels();
       return;
     }
 
@@ -1242,7 +1308,6 @@ class HomeDeliveryPanel extends HTMLElement {
         ${this._renderOtherMailSection()}
         <div class="dashboard-bento">
           ${this._renderPackagesSection()}
-          ${this._renderDeliveredSection()}
         </div>
       </section>
     `;
@@ -1362,6 +1427,9 @@ class HomeDeliveryPanel extends HTMLElement {
               <div class="card-title">Mail Today</div>
               <div class="card-sub">${this._esc(subLabel)}</div>
             </div>
+            <button type="button" class="btn-link history-btn" data-action="open-history" aria-label="Mail history">
+              History
+            </button>
           </div>
           <div class="mail-hero-stage">
             <div class="mail-hero-preview">
@@ -1377,27 +1445,172 @@ class HomeDeliveryPanel extends HTMLElement {
     `;
   }
 
+  _renderHistoryMenubar() {
+    const backLabel = "Back";
+    const embeddedNarrow = this._isHaEmbedded() && this._isNarrow;
+    if (embeddedNarrow) {
+      return `
+        <header class="topbar topbar--embedded-overlay topbar--settings-overlay">
+          <button type="button" class="hd-menubar-back hd-menubar-back--compact" data-action="nav-back" aria-label="${backLabel}">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z"/></svg>
+          </button>
+          <div class="topbar-spacer" aria-hidden="true"></div>
+          <button type="button" class="btn-link" data-action="sync-history" ${this._historyLoading || this._mailSyncing ? "disabled" : ""}>
+            ${this._historyLoading || this._mailSyncing ? "Loading…" : "Refresh"}
+          </button>
+        </header>
+      `;
+    }
+    return `
+      <header class="hd-menubar">
+        <button type="button" class="hd-menubar-back" data-action="nav-back" aria-label="${backLabel}">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z"/></svg>
+          <span>${backLabel}</span>
+        </button>
+        <div class="hd-menubar-title">Mail History</div>
+        <button type="button" class="btn-link" data-action="sync-history" ${this._historyLoading || this._mailSyncing ? "disabled" : ""}>
+          ${this._historyLoading || this._mailSyncing ? "Loading…" : "Refresh 30 days"}
+        </button>
+      </header>
+    `;
+  }
+
+  _renderHistoryContent() {
+    const month = this._historyMonth || new Date(new Date().getFullYear(), new Date().getMonth(), 1);
+    const year = month.getFullYear();
+    const monthIndex = month.getMonth();
+    const monthLabel = month.toLocaleString(undefined, { month: "long", year: "numeric" });
+    const firstDow = new Date(year, monthIndex, 1).getDay();
+    const daysInMonth = new Date(year, monthIndex + 1, 0).getDate();
+    const dayMap = this._historyDayMap();
+    const selected = this._historySelectedDate ? dayMap[this._historySelectedDate] : null;
+
+    const cells = [];
+    for (let i = 0; i < firstDow; i++) cells.push(`<div class="hist-cell hist-cell--empty"></div>`);
+    for (let day = 1; day <= daysInMonth; day++) {
+      const dateKey = `${year}-${String(monthIndex + 1).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+      const entry = dayMap[dateKey];
+      const mailN = entry?.mailpiece_count || 0;
+      const pkgN = entry?.package_count || 0;
+      const active = this._historySelectedDate === dateKey;
+      const hasData = !!(entry && (mailN || pkgN || (entry.letters || []).length));
+      cells.push(`
+        <button type="button" class="hist-cell ${hasData ? "has-data" : ""} ${active ? "active" : ""}"
+          data-action="select-history-day" data-date="${dateKey}" ${hasData ? "" : "disabled"}>
+          <span class="hist-daynum">${day}</span>
+          ${hasData ? `
+            <span class="hist-counts">
+              <span class="hist-mail">${mailN}m</span>
+              <span class="hist-pkg">${pkgN}p</span>
+            </span>
+          ` : ""}
+        </button>
+      `);
+    }
+
+    return `
+      <div class="history-view">
+        <div class="history-calendar card glass">
+          <div class="history-cal-head">
+            <button type="button" class="btn-link" data-action="history-prev-month" aria-label="Previous month">‹</button>
+            <div class="history-cal-title">${this._esc(monthLabel)}</div>
+            <button type="button" class="btn-link" data-action="history-next-month" aria-label="Next month">›</button>
+          </div>
+          <div class="history-dow">
+            <span>Su</span><span>Mo</span><span>Tu</span><span>We</span><span>Th</span><span>Fr</span><span>Sa</span>
+          </div>
+          <div class="history-grid">
+            ${this._historyLoading && !(this._mailHistory || []).length
+              ? `<div class="history-loading">Loading history…</div>`
+              : cells.join("")}
+          </div>
+          <p class="hint history-legend">m = mailpieces · p = inbound packages</p>
+        </div>
+        <div class="history-detail card glass">
+          ${selected ? this._renderHistoryDayDetail(selected) : `
+            <div class="history-detail-empty">
+              <p>Select a day to view letters</p>
+              <p class="hint">Sync inbox or add an address to load up to 30 days of Informed Delivery.</p>
+            </div>
+          `}
+        </div>
+      </div>
+    `;
+  }
+
+  _renderHistoryDayDetail(day) {
+    const letters = day.letters || [];
+    const dateLabel = new Date(`${day.date}T12:00:00`).toLocaleDateString(undefined, {
+      weekday: "long", month: "short", day: "numeric", year: "numeric",
+    });
+    return `
+      <div class="history-detail-head">
+        <div class="card-title">${this._esc(dateLabel)}</div>
+        <div class="card-sub">${day.mailpiece_count || 0} mailpiece${(day.mailpiece_count || 0) === 1 ? "" : "s"} · ${day.package_count || 0} package${(day.package_count || 0) === 1 ? "" : "s"}</div>
+      </div>
+      ${letters.length === 0 ? `<p class="muted">No letter images for this day</p>` : `
+        <div class="history-letters">
+          ${letters.map((letter, index) => `
+            <article class="history-letter">
+              <div class="history-letter-preview">
+                ${letter.url || letter.image ? `
+                  <img src="${this._esc(this._apiUrl(letter.url || `/api/mail/image/${letter.image}`))}"
+                    alt="Letter ${index + 1}" loading="lazy" />
+                  <span class="mail-carousel-badge">Letter #${index + 1}</span>
+                ` : `<div class="mail-preview--placeholder">No image</div>`}
+              </div>
+              <div class="history-letter-meta">
+                <div class="detail-row">
+                  <span class="detail-label">From</span>
+                  <span class="detail-value">${this._esc(letter.from_name || "Unknown")}</span>
+                </div>
+                ${letter.from_address ? `
+                  <div class="detail-row">
+                    <span class="detail-label">Sender addr</span>
+                    <span class="detail-value muted">${this._esc(letter.from_address)}</span>
+                  </div>
+                ` : ""}
+                <div class="detail-row">
+                  <span class="detail-label">For</span>
+                  <span class="detail-value">${this._esc(letter.to_name || "Unknown")}</span>
+                </div>
+                ${letter.to_address ? `
+                  <div class="detail-row">
+                    <span class="detail-label">Deliver to</span>
+                    <span class="detail-value muted">${this._esc(letter.to_address)}</span>
+                  </div>
+                ` : ""}
+              </div>
+            </article>
+          `).join("")}
+        </div>
+      `}
+    `;
+  }
+
   _renderPackagesSection() {
-    const active = this._packages
-      .filter(p => !p.delivered)
-      .slice()
-      .sort((a, b) => {
-        const aNeeds = a.needs_details || (a.auto_discovered && (!a.recipient || !a.destination)) ? 1 : 0;
-        const bNeeds = b.needs_details || (b.auto_discovered && (!b.recipient || !b.destination)) ? 1 : 0;
-        return bNeeds - aNeeds;
-      });
+    const packages = this._packages.slice().sort((a, b) => {
+      const aDelivered = a.delivered ? 1 : 0;
+      const bDelivered = b.delivered ? 1 : 0;
+      if (aDelivered !== bDelivered) return aDelivered - bDelivered;
+      const aNeeds = a.needs_details || (a.auto_discovered && (!a.recipient || !a.destination)) ? 1 : 0;
+      const bNeeds = b.needs_details || (b.auto_discovered && (!b.recipient || !b.destination)) ? 1 : 0;
+      return bNeeds - aNeeds;
+    });
+    const activeCount = packages.filter((p) => !p.delivered).length;
+    const deliveredCount = packages.length - activeCount;
 
     return `
       <article class="glass card packages-card">
         <div class="card-head">
           <div>
-            <div class="card-title">Active Packages</div>
-            <div class="card-sub">${active.length} tracking</div>
+            <div class="card-title">Packages</div>
+            <div class="card-sub">${activeCount} active${deliveredCount ? ` · ${deliveredCount} delivered` : ""}</div>
           </div>
           <button class="btn btn-ghost btn-sm" data-action="add-package">+ Add Package</button>
         </div>
         <div class="packages-body">
-          ${active.length === 0 ? `
+          ${packages.length === 0 ? `
             <div class="empty-state">
               <svg viewBox="0 0 24 24" width="40" height="40" fill="currentColor" style="opacity:0.3"><path d="M20 8h-3V6c0-1.1-.9-2-2-2H9c-1.1 0-2 .9-2 2v2H4c-1.1 0-2 .9-2 2v10h20V10c0-1.1-.9-2-2-2zM9 6h6v2H9V6zm11 12H4v-3h16v3z"/></svg>
               <p>No packages being tracked</p>
@@ -1405,7 +1618,7 @@ class HomeDeliveryPanel extends HTMLElement {
             </div>
           ` : `
             <div class="package-grid">
-              ${active.map(p => this._renderPackageCard(p)).join("")}
+              ${packages.map(p => this._renderPackageCard(p)).join("")}
             </div>
           `}
         </div>
@@ -1413,53 +1626,64 @@ class HomeDeliveryPanel extends HTMLElement {
     `;
   }
 
-  _renderDeliveredSection() {
-    const delivered = this._packages.filter(p => p.delivered);
-    if (delivered.length === 0) return "";
-
-    return `
-      <article class="glass card delivered-card">
-        <div class="card-head">
-          <div>
-            <div class="card-title">Delivered</div>
-            <div class="card-sub">${delivered.length} packages</div>
-          </div>
-        </div>
-        <div class="packages-body">
-          <div class="package-grid delivered">
-            ${delivered.map(p => this._renderPackageCard(p)).join("")}
-          </div>
-        </div>
-      </article>
-    `;
+  _packageStatusLabel(pkg) {
+    if (pkg.delivered) return "Delivered";
+    if (pkg.out_for_delivery) return "Out for delivery";
+    const status = (pkg.status || "").trim();
+    if (!status || /^pending$/i.test(status) || /^unknown$/i.test(status)) {
+      return pkg.error ? "Needs refresh" : "On the way";
+    }
+    return status;
   }
 
   _renderPackageCard(pkg) {
     const isRefreshing = this._refreshingPackage === pkg.id;
     const needsDetails = !!pkg.needs_details || (!!pkg.auto_discovered && (!pkg.recipient || !pkg.destination));
+    const forName = (pkg.recipient || "").trim();
+    const statusLabel = this._packageStatusLabel(pkg);
+    const statusClass = this._statusClass(pkg);
+    const destination = (pkg.destination || "").trim();
+    const detail = (pkg.status_detail || "").trim();
+    const latest = pkg.events?.[0];
+
     return `
-      <div class="package-card ${this._statusClass(pkg)} carrier-${this._carrierClass(pkg.carrier)}${needsDetails ? " needs-details" : ""}" data-package-id="${pkg.id}">
-        <div class="package-header">
+      <div class="package-card ${statusClass} carrier-${this._carrierClass(pkg.carrier)}${needsDetails ? " needs-details" : ""}${pkg.delivered ? " is-delivered" : ""}" data-package-id="${pkg.id}">
+        <div class="pkg-card-top">
+          <div class="pkg-for-block">
+            <span class="pkg-for-label">For</span>
+            <span class="pkg-for-name ${forName ? "" : "is-empty"}">${this._esc(forName || (needsDetails ? "Add recipient" : "Someone"))}</span>
+            ${destination ? `<span class="pkg-for-dest">${this._esc(destination)}</span>` : ""}
+          </div>
+          <div class="pkg-status-chip ${statusClass}" title="${this._esc(detail || statusLabel)}">
+            <span class="pkg-status-dot" aria-hidden="true"></span>
+            ${this._esc(statusLabel)}
+          </div>
+        </div>
+
+        <div class="pkg-card-mid">
           ${this._carrierBadge(pkg.carrier)}
-          <span class="package-status">${this._esc(pkg.status || "Pending")}</span>
+          <span class="package-tracking" title="${this._esc(pkg.tracking_number)}">${this._esc(pkg.tracking_number)}</span>
           ${needsDetails ? `
             <span class="discover-badge" title="Found in USPS Informed Delivery — add who it's for and where">
               <span class="discover-ping" aria-hidden="true"></span>
               Auto discovered
             </span>
           ` : ""}
+          ${pkg.delivered ? `<span class="delivered-mark">Delivered</span>` : ""}
         </div>
-        <div class="package-tracking">${this._esc(pkg.tracking_number)}</div>
-        ${pkg.recipient ? `<div class="package-meta">For: ${this._esc(pkg.recipient)}</div>` : (needsDetails ? `<div class="package-meta muted">For: not set</div>` : "")}
-        ${pkg.destination ? `<div class="package-meta">To: ${this._esc(pkg.destination)}</div>` : (needsDetails ? `<div class="package-meta muted">To: not set</div>` : "")}
-        ${pkg.status_detail ? `<div class="package-detail-text">${this._esc(pkg.status_detail)}</div>` : ""}
-        ${pkg.events?.length > 0 ? `
+
+        ${detail && !pkg.delivered ? `<div class="package-detail-text">${this._esc(detail)}</div>` : ""}
+        ${latest && (latest.date || latest.location) ? `
           <div class="package-latest">
-            <span class="event-date">${this._esc(pkg.events[0].date || "")}</span>
-            <span class="event-location">${this._esc(pkg.events[0].location || "")}</span>
+            <span class="event-date">${this._esc(latest.date || "")}</span>
+            <span class="event-location">${this._esc(latest.location || "")}</span>
           </div>
         ` : ""}
         ${pkg.error ? `<div class="package-error">${this._esc(pkg.error)}</div>` : ""}
+        ${pkg.auto_discovered && !needsDetails ? `
+          <div class="package-meta muted">From Informed Delivery</div>
+        ` : ""}
+
         <div class="package-actions">
           ${needsDetails ? `
             <button class="btn btn-sm btn-discover" data-action="complete-details" data-id="${pkg.id}">
@@ -2276,8 +2500,44 @@ class HomeDeliveryPanel extends HTMLElement {
         await this._syncMail(data.id || null);
         break;
       case "sync-mail":
-        await this._syncMail();
+        await this._syncMail(null, { includeHistory: true });
         break;
+      case "open-history":
+        await this._openMailHistory();
+        break;
+      case "sync-history":
+        this._historyLoading = true;
+        this._render();
+        try {
+          const resp = await this._fetchApi("/api/mail/history/sync", {
+            method: "POST",
+            body: JSON.stringify({ days: 30 }),
+          });
+          this._mailHistory = resp.days || [];
+          this._showToast(`Loaded ${resp.count || 0} history day${(resp.count || 0) === 1 ? "" : "s"}`);
+        } catch (err) {
+          this._showToast(err.message || "History sync failed", { error: true });
+        } finally {
+          this._historyLoading = false;
+          this._render();
+        }
+        break;
+      case "select-history-day":
+        this._historySelectedDate = data.date || null;
+        this._render();
+        break;
+      case "history-prev-month": {
+        const m = this._historyMonth || new Date(new Date().getFullYear(), new Date().getMonth(), 1);
+        this._historyMonth = new Date(m.getFullYear(), m.getMonth() - 1, 1);
+        this._render();
+        break;
+      }
+      case "history-next-month": {
+        const m = this._historyMonth || new Date(new Date().getFullYear(), new Date().getMonth(), 1);
+        this._historyMonth = new Date(m.getFullYear(), m.getMonth() + 1, 1);
+        this._render();
+        break;
+      }
       case "configure-mail":
         this._openSettingsPane("mail");
         break;
@@ -2325,7 +2585,11 @@ class HomeDeliveryPanel extends HTMLElement {
         break;
       }
       case "nav-back":
-        this._navigateTo(this._settingsReturnView || "dashboard");
+        if (this._currentView === "history") {
+          this._navigateTo("dashboard");
+        } else {
+          this._navigateTo(this._settingsReturnView || "dashboard");
+        }
         break;
       case "retry":
         this._loadConfig();
@@ -2650,23 +2914,8 @@ class HomeDeliveryPanel extends HTMLElement {
         min-width: 0;
       }
 
-      @media (min-width: 960px) {
-        .dashboard-bento {
-          grid-template-columns: minmax(0, 1.35fr) minmax(0, 0.65fr);
-          align-items: start;
-        }
-
-        .dashboard-bento .packages-card {
-          grid-column: 1;
-        }
-
-        .dashboard-bento .delivered-card {
-          grid-column: 2;
-        }
-
-        .dashboard-bento .packages-card:only-child {
-          grid-column: 1 / -1;
-        }
+      .dashboard-bento .packages-card {
+        min-width: 0;
       }
 
       @media (prefers-reduced-motion: no-preference) {
@@ -2799,7 +3048,7 @@ class HomeDeliveryPanel extends HTMLElement {
       }
 
       .mail-hero-card--empty .mail-hero-inner {
-        min-height: clamp(140px, 28vw, 180px);
+        min-height: clamp(100px, 22vw, 140px);
       }
 
       .mail-hero-bg {
@@ -2815,15 +3064,187 @@ class HomeDeliveryPanel extends HTMLElement {
       .mail-hero-inner {
         position: relative;
         z-index: 1;
-        padding: var(--space-4);
+        padding: var(--space-3);
         display: flex;
         flex-direction: column;
-        gap: var(--space-3);
+        gap: var(--space-2);
         min-height: inherit;
       }
 
       .mail-hero-head {
         margin-bottom: 0;
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: var(--space-2);
+      }
+
+      .history-btn {
+        font-size: 12px;
+        color: var(--hd-accent);
+        padding: 4px 0;
+        flex-shrink: 0;
+      }
+
+      .history-btn:hover {
+        color: var(--hd-accent-hover);
+      }
+
+      .history-view {
+        display: grid;
+        grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr);
+        gap: var(--space-3);
+        align-items: start;
+      }
+
+      @media (max-width: 900px) {
+        .history-view {
+          grid-template-columns: 1fr;
+        }
+      }
+
+      .history-calendar,
+      .history-detail {
+        padding: var(--space-3);
+      }
+
+      .history-cal-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: var(--space-2);
+        margin-bottom: var(--space-3);
+      }
+
+      .history-cal-title {
+        font-weight: 700;
+        font-size: 15px;
+      }
+
+      .history-dow {
+        display: grid;
+        grid-template-columns: repeat(7, minmax(0, 1fr));
+        gap: 4px;
+        margin-bottom: 4px;
+        color: var(--hd-muted);
+        font-size: 11px;
+        text-align: center;
+      }
+
+      .history-grid {
+        display: grid;
+        grid-template-columns: repeat(7, minmax(0, 1fr));
+        gap: 4px;
+      }
+
+      .hist-cell {
+        appearance: none;
+        border: 1px solid var(--hd-border);
+        background: transparent;
+        color: var(--hd-text);
+        border-radius: var(--radius-sm);
+        min-height: 52px;
+        padding: 4px;
+        display: flex;
+        flex-direction: column;
+        align-items: flex-start;
+        justify-content: space-between;
+        cursor: pointer;
+        text-align: left;
+      }
+
+      .hist-cell--empty {
+        border-color: transparent;
+        pointer-events: none;
+      }
+
+      .hist-cell:disabled {
+        opacity: 0.35;
+        cursor: default;
+      }
+
+      .hist-cell.has-data {
+        border-color: var(--hd-border-strong);
+        background: rgba(255, 255, 255, 0.03);
+      }
+
+      .hist-cell.active {
+        border-color: var(--hd-accent);
+        box-shadow: inset 0 0 0 1px var(--hd-accent);
+      }
+
+      .hist-daynum {
+        font-size: 12px;
+        font-weight: 600;
+      }
+
+      .hist-counts {
+        display: flex;
+        gap: 4px;
+        font-size: 10px;
+        color: var(--hd-muted);
+      }
+
+      .hist-mail { color: var(--hd-accent); }
+      .hist-pkg { color: #7eb8ff; }
+
+      .history-legend,
+      .history-loading {
+        margin-top: var(--space-2);
+        color: var(--hd-muted);
+        font-size: 11px;
+      }
+
+      .history-detail-empty {
+        padding: var(--space-4) 0;
+        text-align: center;
+        color: var(--hd-muted);
+      }
+
+      .history-detail-head {
+        margin-bottom: var(--space-3);
+      }
+
+      .history-letters {
+        display: flex;
+        flex-direction: column;
+        gap: var(--space-3);
+      }
+
+      .history-letter {
+        display: grid;
+        grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr);
+        gap: var(--space-3);
+        align-items: start;
+        padding-top: var(--space-3);
+        border-top: 1px solid var(--hd-border);
+      }
+
+      @media (max-width: 560px) {
+        .history-letter {
+          grid-template-columns: 1fr;
+        }
+      }
+
+      .history-letter-preview {
+        position: relative;
+        border-radius: var(--radius-md);
+        overflow: hidden;
+        border: 1px solid var(--hd-border);
+        background: #fff;
+        aspect-ratio: 724 / 320;
+      }
+
+      .history-letter-preview img {
+        width: 100%;
+        height: 100%;
+        object-fit: contain;
+        display: block;
+      }
+
+      .history-letter-meta .detail-row {
+        border-bottom: none;
+        padding: 3px 0;
       }
 
       .mail-hero-eyebrow {
@@ -2835,36 +3256,41 @@ class HomeDeliveryPanel extends HTMLElement {
       }
 
       .mail-hero-stage {
-        display: flex;
-        flex-direction: column;
-        align-items: stretch;
-        gap: var(--space-4);
+        display: grid;
+        grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr);
+        align-items: center;
+        gap: var(--space-3);
         min-width: 0;
       }
 
       .mail-hero-preview {
         width: 100%;
+        max-width: 420px;
         display: flex;
         justify-content: center;
         align-items: center;
-        min-height: clamp(100px, 22vw, 160px);
+        min-height: 0;
+        justify-self: center;
       }
 
       .mail-hero-counts {
         display: grid;
         grid-template-columns: repeat(2, minmax(0, 1fr));
-        gap: var(--space-3);
+        gap: var(--space-2);
       }
 
       .mail-count-block {
         text-align: center;
-        padding: var(--space-3);
-        border-radius: var(--radius-md);
+        padding: var(--space-2);
+        border-radius: var(--radius-sm);
         background: rgba(255, 255, 255, 0.03);
         border: 1px solid var(--hd-border);
       }
 
       @media (max-width: 560px) {
+        .mail-hero-stage {
+          grid-template-columns: 1fr;
+        }
         .mail-hero-counts {
           grid-template-columns: 1fr 1fr;
         }
@@ -2890,7 +3316,7 @@ class HomeDeliveryPanel extends HTMLElement {
       }
 
       .mail-count-large {
-        font-size: clamp(56px, 16vw, 88px);
+        font-size: clamp(24px, 6.5vw, 34px);
         font-weight: 700;
         color: var(--hd-accent);
         line-height: 0.95;
@@ -2916,7 +3342,7 @@ class HomeDeliveryPanel extends HTMLElement {
 
       .mail-preview img {
         width: 100%;
-        max-height: clamp(100px, 22vw, 160px);
+        max-height: clamp(56px, 12vw, 96px);
         object-fit: contain;
         object-position: center;
         border-radius: var(--radius-md);
@@ -2930,8 +3356,8 @@ class HomeDeliveryPanel extends HTMLElement {
         align-items: center;
         justify-content: center;
         width: 100%;
-        min-height: clamp(100px, 22vw, 160px);
-        aspect-ratio: auto;
+        min-height: clamp(56px, 12vw, 96px);
+        aspect-ratio: 724 / 320;
         border-radius: var(--radius-md);
         border: 1px dashed var(--hd-border-strong);
         background: var(--hd-elevated);
@@ -2970,7 +3396,8 @@ class HomeDeliveryPanel extends HTMLElement {
         width: 100%;
         min-width: 0;
         max-width: 100%;
-        min-height: clamp(100px, 22vw, 160px);
+        min-height: 0;
+        max-height: clamp(56px, 12vw, 96px);
         aspect-ratio: 724 / 320;
         border-radius: var(--radius-md);
         overflow: hidden;
@@ -3381,53 +3808,175 @@ class HomeDeliveryPanel extends HTMLElement {
 
       .package-grid {
         display: grid;
-        grid-template-columns: repeat(auto-fill, minmax(min(100%, 260px), 1fr));
+        grid-template-columns: repeat(auto-fill, minmax(min(100%, 280px), 1fr));
         gap: var(--space-3);
       }
 
-      .package-grid.delivered {
-        opacity: 0.85;
-      }
-
       .package-card {
-        background: var(--hd-elevated);
+        position: relative;
+        overflow: hidden;
+        background:
+          radial-gradient(ellipse 80% 60% at 0% 0%, color-mix(in srgb, var(--hd-accent) 10%, transparent), transparent 55%),
+          linear-gradient(165deg, var(--hd-elevated) 0%, var(--hd-surface) 100%);
         border: 1px solid var(--hd-border);
-        border-top-width: 3px;
-        border-top-color: var(--hd-border-strong);
-        border-radius: var(--radius-lg);
-        padding: var(--space-3);
+        border-radius: 16px;
+        padding: var(--space-3) var(--space-3) var(--space-2);
         transition: border-color var(--dur-fast) var(--ease), box-shadow var(--dur-fast) var(--ease), transform var(--dur-fast) var(--ease);
       }
 
-      .package-card.carrier-usps { border-top-color: #004B87; }
-      .package-card.carrier-ups { border-top-color: #FFB500; }
-      .package-card.carrier-fedex { border-top-color: #4D148C; }
+      .package-card.carrier-usps {
+        background:
+          radial-gradient(ellipse 70% 55% at 0% 0%, rgba(0, 75, 135, 0.18), transparent 55%),
+          linear-gradient(165deg, var(--hd-elevated) 0%, var(--hd-surface) 100%);
+      }
+      .package-card.carrier-ups {
+        background:
+          radial-gradient(ellipse 70% 55% at 0% 0%, rgba(255, 181, 0, 0.14), transparent 55%),
+          linear-gradient(165deg, var(--hd-elevated) 0%, var(--hd-surface) 100%);
+      }
+      .package-card.carrier-fedex {
+        background:
+          radial-gradient(ellipse 70% 55% at 0% 0%, rgba(77, 20, 140, 0.16), transparent 55%),
+          linear-gradient(165deg, var(--hd-elevated) 0%, var(--hd-surface) 100%);
+      }
+      .package-card.carrier-estes {
+        background:
+          radial-gradient(ellipse 70% 55% at 0% 0%, rgba(255, 210, 0, 0.14), transparent 55%),
+          linear-gradient(165deg, var(--hd-elevated) 0%, var(--hd-surface) 100%);
+      }
 
       .package-card:hover {
-        border-left-color: var(--hd-border-strong);
-        border-right-color: var(--hd-border-strong);
-        border-bottom-color: var(--hd-border-strong);
+        border-color: var(--hd-border-strong);
         box-shadow: var(--shadow-md);
         transform: translateY(-2px);
       }
 
       .package-card.out-for-delivery {
-        border-color: var(--hd-warning);
+        border-color: color-mix(in srgb, var(--hd-warning) 55%, var(--hd-border));
       }
 
-      .package-card.delivered {
-        border-color: var(--hd-success);
+      .package-card.delivered,
+      .package-card.is-delivered {
+        border-color: color-mix(in srgb, var(--hd-success) 50%, var(--hd-border));
+        opacity: 0.92;
       }
 
       .package-card.error {
-        border-color: var(--hd-danger);
+        border-color: color-mix(in srgb, var(--hd-danger) 45%, var(--hd-border));
       }
 
       .package-card.needs-details {
-        border-color: color-mix(in srgb, #e8a0a8 55%, var(--hd-border));
-        background:
-          linear-gradient(135deg, color-mix(in srgb, #e8a0a8 10%, transparent), transparent 42%),
-          var(--hd-elevated);
+        border-color: color-mix(in srgb, #5dbe7a 55%, var(--hd-border));
+        box-shadow: inset 0 0 0 1px color-mix(in srgb, #5dbe7a 25%, transparent);
+      }
+
+      .pkg-card-top {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: var(--space-2);
+        margin-bottom: var(--space-3);
+      }
+
+      .pkg-for-block {
+        min-width: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+      }
+
+      .pkg-for-label {
+        font-size: 10px;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        color: var(--hd-muted);
+        font-weight: 600;
+      }
+
+      .pkg-for-name {
+        font-size: clamp(18px, 3.2vw, 22px);
+        font-weight: 750;
+        letter-spacing: -0.03em;
+        line-height: 1.1;
+        color: var(--hd-text);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .pkg-for-name.is-empty {
+        color: color-mix(in srgb, #5dbe7a 85%, var(--hd-text));
+        font-style: italic;
+        font-weight: 650;
+      }
+
+      .pkg-for-dest {
+        font-size: 12px;
+        color: var(--hd-muted);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .pkg-status-chip {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        flex-shrink: 0;
+        max-width: 48%;
+        padding: 6px 10px;
+        border-radius: 999px;
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0.01em;
+        color: var(--hd-text);
+        background: color-mix(in srgb, var(--hd-text) 6%, transparent);
+        border: 1px solid var(--hd-border);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      .pkg-status-dot {
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        background: var(--hd-muted);
+        flex-shrink: 0;
+      }
+
+      .pkg-status-chip.out-for-delivery {
+        color: #f0c674;
+        border-color: color-mix(in srgb, #f0c674 45%, transparent);
+        background: color-mix(in srgb, #f0c674 12%, transparent);
+      }
+      .pkg-status-chip.out-for-delivery .pkg-status-dot { background: #f0c674; }
+
+      .pkg-status-chip.delivered {
+        color: #6dca8b;
+        border-color: color-mix(in srgb, #6dca8b 50%, transparent);
+        background: color-mix(in srgb, #6dca8b 14%, transparent);
+      }
+      .pkg-status-chip.delivered .pkg-status-dot { background: #6dca8b; }
+
+      .pkg-status-chip.error {
+        color: #e88a8a;
+        border-color: color-mix(in srgb, #e88a8a 45%, transparent);
+        background: color-mix(in srgb, #e88a8a 12%, transparent);
+      }
+      .pkg-status-chip.error .pkg-status-dot { background: #e88a8a; }
+
+      .pkg-status-chip.in-transit .pkg-status-dot,
+      .pkg-status-chip.pending .pkg-status-dot {
+        background: #7eb8ff;
+      }
+
+      .pkg-card-mid {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        flex-wrap: wrap;
+        margin-bottom: 2px;
       }
 
       .discover-badge {
@@ -3441,9 +3990,9 @@ class HomeDeliveryPanel extends HTMLElement {
         font-size: 10px;
         font-weight: 650;
         letter-spacing: 0.02em;
-        color: #8a3a44;
-        background: color-mix(in srgb, #e8a0a8 28%, var(--hd-elevated));
-        border: 1px solid color-mix(in srgb, #e8a0a8 55%, transparent);
+        color: #3f9a5f;
+        background: color-mix(in srgb, #5dbe7a 18%, var(--hd-elevated));
+        border: 1px solid color-mix(in srgb, #5dbe7a 65%, transparent);
         white-space: nowrap;
       }
 
@@ -3455,33 +4004,39 @@ class HomeDeliveryPanel extends HTMLElement {
         width: 7px;
         height: 7px;
         border-radius: 50%;
-        background: #d96b78;
-        box-shadow: 0 0 0 0 color-mix(in srgb, #d96b78 55%, transparent);
+        background: #5dbe7a;
+        box-shadow: 0 0 0 0 color-mix(in srgb, #5dbe7a 55%, transparent);
         animation: discover-ping 1.8s ease-out infinite;
         flex-shrink: 0;
       }
 
       @keyframes discover-ping {
-        0% { box-shadow: 0 0 0 0 color-mix(in srgb, #d96b78 55%, transparent); }
+        0% { box-shadow: 0 0 0 0 color-mix(in srgb, #5dbe7a 55%, transparent); }
         70% { box-shadow: 0 0 0 7px transparent; }
         100% { box-shadow: 0 0 0 0 transparent; }
       }
 
+      .delivered-mark {
+        margin-left: auto;
+        font-size: 10px;
+        font-weight: 750;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: #3f9a5f;
+        border: 1px solid color-mix(in srgb, #5dbe7a 55%, transparent);
+        border-radius: 6px;
+        padding: 2px 6px;
+        transform: rotate(-2deg);
+      }
+
       .btn-discover {
-        color: #8a3a44;
-        border-color: color-mix(in srgb, #e8a0a8 65%, var(--hd-border));
-        background: color-mix(in srgb, #e8a0a8 18%, var(--hd-elevated));
+        color: #3f9a5f;
+        border-color: color-mix(in srgb, #5dbe7a 65%, var(--hd-border));
+        background: color-mix(in srgb, #5dbe7a 16%, var(--hd-elevated));
       }
 
       .btn-discover:hover {
-        border-color: #d96b78;
-      }
-
-      .package-header {
-        display: flex;
-        align-items: center;
-        gap: var(--space-2);
-        margin-bottom: var(--space-2);
+        border-color: #5dbe7a;
       }
 
       .carrier-badge {
@@ -3493,35 +4048,35 @@ class HomeDeliveryPanel extends HTMLElement {
         letter-spacing: 0.02em;
       }
 
-      .package-status {
-        font-size: 13px;
-        font-weight: 600;
-      }
-
       .package-tracking {
         font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, monospace;
-        font-size: 12px;
+        font-size: 11px;
         color: var(--hd-muted);
-        margin-bottom: var(--space-2);
         word-break: break-all;
+        min-width: 0;
+        flex: 1 1 120px;
       }
 
       .package-meta {
         font-size: 12px;
         color: var(--hd-muted);
+        margin-top: var(--space-1);
       }
 
       .package-detail-text {
         font-size: 12px;
         margin-top: var(--space-2);
+        color: var(--hd-text);
+        opacity: 0.88;
       }
 
       .package-latest {
         font-size: 11px;
         color: var(--hd-muted);
         margin-top: var(--space-2);
-        padding-top: var(--space-2);
-        border-top: 1px solid var(--hd-border);
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px 10px;
       }
 
       .package-error {
@@ -3534,7 +4089,7 @@ class HomeDeliveryPanel extends HTMLElement {
         display: flex;
         gap: var(--space-2);
         margin-top: var(--space-3);
-        padding-top: var(--space-3);
+        padding-top: var(--space-2);
         border-top: 1px solid var(--hd-border);
         flex-wrap: wrap;
       }

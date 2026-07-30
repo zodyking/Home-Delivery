@@ -10,8 +10,9 @@ import imaplib
 import logging
 import re
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from email.message import Message
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any
 
@@ -634,6 +635,133 @@ def _select_mailbox(imap: imaplib.IMAP4_SSL, folder: str) -> str:
     raise ValueError(f"Failed to select mailbox '{folder}': {last_error}")
 
 
+def _message_delivery_date(msg: Message) -> str:
+    """Return YYYY-MM-DD for an Informed Delivery message (local date)."""
+    raw = msg.get("Date")
+    if raw:
+        try:
+            dt = parsedate_to_datetime(raw)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.astimezone().date().isoformat()
+        except Exception:
+            pass
+    return datetime.now().date().isoformat()
+
+
+def _process_informed_delivery_message(msg: Message) -> dict[str, Any]:
+    """Parse counts, tracking numbers, and letter-scan image bytes from one digest."""
+    digest = _parse_delivery_digest(msg)
+    extracted = _extract_images_from_message(msg)
+
+    if digest["mailpiece_count"] is not None:
+        mailpiece_count = digest["mailpiece_count"]
+    else:
+        mailpiece_count = len(extracted)
+        if _has_missing_mailpiece_placeholder(msg) and mailpiece_count == 0:
+            mailpiece_count = 0
+
+    images = _select_mailpiece_images(extracted, mailpiece_count)
+    package_count = digest.get("package_count") or 0
+    tracking_numbers = digest.get("tracking_numbers") or []
+
+    return {
+        "date": _message_delivery_date(msg),
+        "mailpiece_count": mailpiece_count,
+        "package_count": package_count,
+        "piece_count": mailpiece_count + package_count,
+        "images": images,
+        "tracking_numbers": tracking_numbers,
+        "section_counts": digest.get("section_counts") or {},
+    }
+
+
+def _connect_imap(mail_config: dict[str, Any]) -> tuple[imaplib.IMAP4_SSL, str]:
+    host = mail_config.get("imap_host", "")
+    port = mail_config.get("imap_port", 993)
+    user = mail_config.get("imap_user", "")
+    password = mail_config.get("imap_password", "")
+    folder = _normalize_folder(mail_config.get("folder"))
+
+    if not all([host, user, password]):
+        raise ValueError("IMAP credentials not configured")
+
+    imap = imaplib.IMAP4_SSL(host, port)
+    imap.login(user, password)
+    selected = _select_mailbox(imap, folder)
+    return imap, selected
+
+
+def _imap_search(imap: imaplib.IMAP4_SSL, since_date: str) -> list[bytes]:
+    search_query = _build_search_query(USPS_SENDERS, INFORMED_DELIVERY_SUBJECTS, since_date)
+    try:
+        status, data = imap.search("UTF-8", search_query)
+    except Exception:
+        status, data = imap.search(None, search_query)
+
+    if status != "OK":
+        detail = data[0].decode("utf-8", errors="replace") if data and data[0] else "search failed"
+        raise ValueError(f"IMAP search failed: {detail}")
+
+    if not data or not data[0]:
+        return []
+    return data[0].split()
+
+
+def _fetch_message(imap: imaplib.IMAP4_SSL, email_id: bytes) -> Message | None:
+    status, msg_data = imap.fetch(email_id, "(RFC822)")
+    if status != "OK" or not msg_data or not msg_data[0]:
+        return None
+    raw_email = msg_data[0][1]
+    return email.message_from_bytes(raw_email)
+
+
+async def _save_history_letter_images(
+    account_key: str,
+    day: str,
+    images: list[bytes],
+) -> list[dict[str, Any]]:
+    """Save letter images for a history day and OCR from/to parties."""
+    from mail.letter_ocr import parse_letter_parties
+    from PIL import Image
+    from io import BytesIO
+
+    letters: list[dict[str, Any]] = []
+    safe_key = re.sub(r"[^a-zA-Z0-9]", "", str(account_key))[:12] or "mail"
+    day_key = day.replace("-", "")
+    prefix = f"hist_{safe_key}_{day_key}_"
+
+    # Drop prior files for this account/day so Refresh doesn't orphan images.
+    try:
+        for path in MAIL_IMAGES_DIR.glob(f"{prefix}*.jpg"):
+            path.unlink(missing_ok=True)
+    except Exception as cleanup_exc:
+        logger.debug("History image cleanup skipped: %s", cleanup_exc)
+
+    for index, img_bytes in enumerate(images):
+        if not img_bytes:
+            continue
+        try:
+            parties = parse_letter_parties(img_bytes)
+            img = Image.open(BytesIO(img_bytes)).convert("RGB")
+            img.thumbnail((724, 320), Image.Resampling.LANCZOS)
+            filename = f"{prefix}{index}_{uuid.uuid4().hex[:6]}.jpg"
+            output_path = MAIL_IMAGES_DIR / filename
+            img.save(output_path, format="JPEG", quality=88, optimize=True)
+            letters.append({
+                "image": filename,
+                "account_id": account_key,
+                "from_name": parties.get("from_name") or "",
+                "from_address": parties.get("from_address") or "",
+                "to_name": parties.get("to_name") or "",
+                "to_address": parties.get("to_address") or "",
+            })
+        except Exception as exc:
+            logger.warning("Failed to save/OCR history letter %s/%s: %s", day, index, exc)
+
+    return letters
+
+
 async def check_informed_delivery(mail_config: dict[str, Any]) -> dict[str, Any]:
     """
     Check IMAP for today's Informed Delivery email.
@@ -644,47 +772,24 @@ async def check_informed_delivery(mail_config: dict[str, Any]) -> dict[str, Any]
     Returns:
         Dict with piece_count and gif_filename.
     """
-    host = mail_config.get("imap_host", "")
-    port = mail_config.get("imap_port", 993)
-    user = mail_config.get("imap_user", "")
-    password = mail_config.get("imap_password", "")
-    folder = _normalize_folder(mail_config.get("folder"))
-
-    if not all([host, user, password]):
-        raise ValueError("IMAP credentials not configured")
-
-    logger.info(f"Checking Informed Delivery via IMAP: {host} (folder: {folder})")
+    logger.info(
+        "Checking Informed Delivery via IMAP: %s (folder: %s)",
+        mail_config.get("imap_host"),
+        _normalize_folder(mail_config.get("folder")),
+    )
 
     imap: imaplib.IMAP4_SSL | None = None
     try:
-        imap = imaplib.IMAP4_SSL(host, port)
-        imap.login(user, password)
-        selected_folder = _select_mailbox(imap, folder)
+        imap, selected_folder = _connect_imap(mail_config)
     except Exception as e:
         logger.error(f"IMAP connection failed: {e}")
-        if imap is not None:
-            try:
-                imap.logout()
-            except Exception:
-                pass
         raise
 
     try:
-        # Search for today's Informed Delivery email
-        search_query = _build_search_query(USPS_SENDERS, INFORMED_DELIVERY_SUBJECTS, _get_today_imap_date())
-        logger.debug(f"IMAP search in {selected_folder}: {search_query}")
+        email_ids = _imap_search(imap, _get_today_imap_date())
+        logger.debug("IMAP search in %s found %s message(s)", selected_folder, len(email_ids))
 
-        # Try UTF-8 charset first
-        try:
-            status, data = imap.search("UTF-8", search_query)
-        except Exception:
-            status, data = imap.search(None, search_query)
-
-        if status != "OK":
-            detail = data[0].decode("utf-8", errors="replace") if data and data[0] else "search failed"
-            raise ValueError(f"IMAP search failed: {detail}")
-
-        if not data or not data[0]:
+        if not email_ids:
             logger.info("No Informed Delivery email found for today")
             return {
                 "piece_count": 0,
@@ -694,14 +799,12 @@ async def check_informed_delivery(mail_config: dict[str, Any]) -> dict[str, Any]
                 "preview_images": [],
                 "tracking_numbers": [],
                 "section_counts": {},
+                "date": datetime.now().date().isoformat(),
+                "letters": [],
             }
 
-        # Get the latest matching email
-        email_ids = data[0].split()
-        latest_id = email_ids[-1]
-
-        status, msg_data = imap.fetch(latest_id, "(RFC822)")
-        if status != "OK" or not msg_data[0]:
+        msg = _fetch_message(imap, email_ids[-1])
+        if not msg:
             logger.warning("Failed to fetch email")
             return {
                 "piece_count": 0,
@@ -711,58 +814,123 @@ async def check_informed_delivery(mail_config: dict[str, Any]) -> dict[str, Any]
                 "preview_images": [],
                 "tracking_numbers": [],
                 "section_counts": {},
+                "date": datetime.now().date().isoformat(),
+                "letters": [],
             }
 
-        raw_email = msg_data[0][1]
-        msg = email.message_from_bytes(raw_email)
-
-        digest = _parse_delivery_digest(msg)
-
-        # Extract real letter scans only (exclude Local XChange / campaign ads).
-        extracted = _extract_images_from_message(msg)
-
-        if digest["mailpiece_count"] is not None:
-            mailpiece_count = digest["mailpiece_count"]
-        else:
-            mailpiece_count = len(extracted)
-            if _has_missing_mailpiece_placeholder(msg) and mailpiece_count == 0:
-                mailpiece_count = 0
-
-        images = _select_mailpiece_images(extracted, mailpiece_count)
-
-        # Only Expected Today packages count toward the dashboard package total.
-        package_count = digest.get("package_count") or 0
-        tracking_numbers = digest.get("tracking_numbers") or []
-
+        parsed = _process_informed_delivery_message(msg)
         logger.info(
             "Parsed Informed Delivery: %s mailpiece(s), %s Expected Today package(s), "
-            "%s tracking number(s) discovered, %s preview image(s) from %s extracted "
-            "(sections=%s)",
-            mailpiece_count,
-            package_count,
-            len(tracking_numbers),
-            len(images),
-            len(extracted),
-            digest.get("section_counts"),
+            "%s tracking number(s) discovered, %s preview image(s)",
+            parsed["mailpiece_count"],
+            parsed["package_count"],
+            len(parsed["tracking_numbers"]),
+            len(parsed["images"]),
         )
-
-        piece_count = mailpiece_count + package_count
 
         preview_images, gif_filename = await _save_mail_previews(
             mail_config.get("id", "mail"),
-            images,
+            parsed["images"],
             previous_files=_collect_previous_files(mail_config),
         )
 
+        # OCR today's letters for history + UI enrichment (reuse carousel files)
+        from mail.letter_ocr import parse_letter_parties
+
+        letters = []
+        account_key = mail_config.get("id", "mail")
+        for index, img_bytes in enumerate(parsed["images"]):
+            parties = parse_letter_parties(img_bytes)
+            letters.append({
+                "image": preview_images[index] if index < len(preview_images) else "",
+                "account_id": account_key,
+                "from_name": parties.get("from_name") or "",
+                "from_address": parties.get("from_address") or "",
+                "to_name": parties.get("to_name") or "",
+                "to_address": parties.get("to_address") or "",
+            })
+
         return {
-            "piece_count": piece_count,
-            "mailpiece_count": mailpiece_count,
-            "package_count": package_count,
+            "piece_count": parsed["piece_count"],
+            "mailpiece_count": parsed["mailpiece_count"],
+            "package_count": parsed["package_count"],
             "gif_filename": gif_filename,
             "preview_images": preview_images,
-            "tracking_numbers": tracking_numbers,
-            "section_counts": digest.get("section_counts") or {},
+            "tracking_numbers": parsed["tracking_numbers"],
+            "section_counts": parsed["section_counts"],
+            "date": parsed["date"],
+            "letters": letters,
         }
+
+    finally:
+        if imap is not None:
+            try:
+                imap.close()
+            except Exception:
+                pass
+            try:
+                imap.logout()
+            except Exception:
+                pass
+
+
+async def fetch_informed_delivery_history(
+    mail_config: dict[str, Any],
+    days: int = 30,
+) -> list[dict[str, Any]]:
+    """
+    Fetch Informed Delivery digests for the last N days and build history days.
+
+    Returns one entry per calendar day (latest digest wins if multiples exist).
+    """
+    days = max(1, min(int(days or 30), 30))
+    since = (datetime.now() - timedelta(days=days - 1)).strftime("%d-%b-%Y")
+    logger.info(
+        "Fetching Informed Delivery history (%s days) for %s since %s",
+        days,
+        mail_config.get("imap_user"),
+        since,
+    )
+
+    imap: imaplib.IMAP4_SSL | None = None
+    try:
+        imap, _selected = _connect_imap(mail_config)
+        email_ids = _imap_search(imap, since)
+        if not email_ids:
+            return []
+
+        by_date: dict[str, dict[str, Any]] = {}
+
+        for email_id in email_ids:
+            msg = _fetch_message(imap, email_id)
+            if not msg:
+                continue
+            parsed = _process_informed_delivery_message(msg)
+            day = parsed["date"]
+            # Keep the latest message for each day (IDs are chronological)
+            by_date[day] = parsed
+
+        history_days: list[dict[str, Any]] = []
+        for day in sorted(by_date.keys()):
+            parsed = by_date[day]
+            letters = await _save_history_letter_images(
+                mail_config.get("id", "mail"),
+                day,
+                parsed["images"],
+            )
+            history_days.append({
+                "date": day,
+                "mailpiece_count": parsed["mailpiece_count"],
+                "package_count": parsed["package_count"],
+                "piece_count": parsed["piece_count"],
+                "letters": letters,
+                "preview_images": [letter["image"] for letter in letters if letter.get("image")],
+                "tracking_numbers": parsed["tracking_numbers"],
+                "account_id": mail_config.get("id"),
+            })
+
+        logger.info("Built %s history day(s) from Informed Delivery", len(history_days))
+        return history_days
 
     finally:
         if imap is not None:

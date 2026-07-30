@@ -468,12 +468,41 @@ async def test_imap_connection(request: MailImapTestRequest):
     }
 
 
-async def _sync_mail_accounts(account_ids: list[str] | None = None) -> dict[str, Any]:
+async def _backfill_mail_history(accounts: list[dict[str, Any]], days: int = 30) -> int:
+    """Fetch up to N days of Informed Delivery digests into mail history."""
+    from mail.informed_delivery import fetch_informed_delivery_history
+
+    day_count = 0
+    for account in accounts:
+        if not all([account.get("imap_host"), account.get("imap_user"), account.get("imap_password")]):
+            continue
+        if account.get("enabled") is False:
+            continue
+        try:
+            history_days = await fetch_informed_delivery_history(account, days=days)
+            if history_days:
+                await config_store.replace_mail_history(history_days)
+                day_count += len(history_days)
+        except Exception as exc:
+            logger.warning(
+                "Mail history backfill failed for %s: %s",
+                account.get("label") or account.get("imap_user"),
+                exc,
+            )
+    return day_count
+
+
+async def _sync_mail_accounts(
+    account_ids: list[str] | None = None,
+    *,
+    include_history: bool | None = None,
+) -> dict[str, Any]:
     """Sync one or all mail accounts via IMAP."""
     from mail.informed_delivery import check_informed_delivery
 
     config = await config_store.load()
     accounts = config.get("mail", {}).get("accounts", [])
+    existing_history = config.get("mail", {}).get("history") or {}
 
     if not accounts:
         raise HTTPException(status_code=400, detail="No mail accounts configured")
@@ -483,6 +512,13 @@ async def _sync_mail_accounts(account_ids: list[str] | None = None) -> dict[str,
         targets = [a for a in accounts if a.get("id") in account_ids]
         if not targets:
             raise HTTPException(status_code=404, detail="Mail account not found")
+
+    # Backfill last 30 days when history is empty, or when explicitly requested
+    # (e.g. first address setup / Sync inbox from settings).
+    should_backfill = include_history if include_history is not None else (not existing_history)
+    history_days_loaded = 0
+    if should_backfill:
+        history_days_loaded = await _backfill_mail_history(targets, days=30)
 
     results = []
     total_pieces = 0
@@ -516,6 +552,21 @@ async def _sync_mail_accounts(account_ids: list[str] | None = None) -> dict[str,
                 preview_images=preview_images,
                 last_error=None,
             )
+            # Keep today's history day in sync with OCR parties
+            try:
+                await config_store.upsert_mail_history_day({
+                    "date": result.get("date") or utc_now().strftime("%Y-%m-%d"),
+                    "mailpiece_count": mailpiece_count,
+                    "package_count": package_count,
+                    "piece_count": piece_count,
+                    "letters": result.get("letters") or [],
+                    "preview_images": preview_images,
+                    "tracking_numbers": result.get("tracking_numbers") or [],
+                    "account_id": account_id,
+                })
+            except Exception as hist_exc:
+                logger.warning("Failed to upsert today's mail history for %s: %s", label, hist_exc)
+
             discovered = []
             try:
                 from mail.discover_packages import add_discovered_packages
@@ -539,6 +590,7 @@ async def _sync_mail_accounts(account_ids: list[str] | None = None) -> dict[str,
                 "gif_url": _mail_image_url(gif_filename),
                 "preview_images": _mail_preview_payload(preview_images),
                 "discovered_packages": len(discovered),
+                "letters": result.get("letters") or [],
             })
         except Exception as e:
             logger.error(f"Mail sync failed for {label}: {e}")
@@ -566,6 +618,7 @@ async def _sync_mail_accounts(account_ids: list[str] | None = None) -> dict[str,
     return {
         "success": True,
         "piece_count": total_pieces,
+        "history_days": history_days_loaded,
         "gif_url": f"/api/mail/image/{primary_gif}" if primary_gif else None,
         "results": results,
     }
@@ -584,7 +637,13 @@ async def sync_mail(request: Request):
 
     account_id = body.get("account_id") if isinstance(body, dict) else None
     account_ids = [account_id] if account_id else None
-    return await _sync_mail_accounts(account_ids)
+    # Settings Sync / first setup should pull history; dashboard refresh uses auto empty-history rule.
+    include_history = None
+    if isinstance(body, dict) and "include_history" in body:
+        include_history = bool(body.get("include_history"))
+    elif isinstance(body, dict) and body.get("history"):
+        include_history = True
+    return await _sync_mail_accounts(account_ids, include_history=include_history)
 
 
 @app.post("/api/mail/refresh")
@@ -598,6 +657,57 @@ async def refresh_mail():
         raise HTTPException(status_code=400, detail="No enabled mail accounts")
 
     return await _sync_mail_accounts(enabled_ids)
+
+
+@app.get("/api/mail/history")
+async def get_mail_history():
+    """Return calendar history of Informed Delivery days (last ~30–45 days)."""
+    history = await config_store.get_mail_history()
+    days = []
+    for date_key in sorted(history.keys(), reverse=True):
+        entry = history[date_key]
+        letters = []
+        for letter in entry.get("letters") or []:
+            image = letter.get("image")
+            letters.append({
+                **letter,
+                "url": _mail_image_url(image) if image else None,
+            })
+        days.append({
+            "date": date_key,
+            "mailpiece_count": entry.get("mailpiece_count", 0),
+            "package_count": entry.get("package_count", 0),
+            "piece_count": entry.get("piece_count", 0),
+            "letters": letters,
+            "preview_images": _mail_preview_payload(entry.get("preview_images") or []),
+        })
+    return {"days": days, "count": len(days)}
+
+
+@app.post("/api/mail/history/sync")
+async def sync_mail_history(request: Request):
+    """Force a 30-day Informed Delivery history backfill."""
+    body = {}
+    try:
+        raw = await request.body()
+        if raw:
+            body = json.loads(raw)
+    except Exception:
+        body = {}
+
+    days = int(body.get("days") or 30) if isinstance(body, dict) else 30
+    config = await config_store.load()
+    accounts = [
+        a for a in config.get("mail", {}).get("accounts", [])
+        if a.get("enabled", True)
+        and all([a.get("imap_host"), a.get("imap_user"), a.get("imap_password")])
+    ]
+    if not accounts:
+        raise HTTPException(status_code=400, detail="No enabled mail accounts")
+
+    loaded = await _backfill_mail_history(accounts, days=days)
+    history = await get_mail_history()
+    return {"success": True, "history_days": loaded, **history}
 
 
 @app.get("/api/mail/image/{filename}")

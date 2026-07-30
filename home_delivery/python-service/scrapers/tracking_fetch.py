@@ -23,29 +23,48 @@ from .base import get_page, reset_browser_on_failure
 from .navigation import (
     HTTP2_ERROR_MARKERS,
     goto_tracking_page,
+    wait_for_estes_tracking,
     wait_for_ups_tracking,
     wait_for_usps_tracking,
 )
-from .parsers import parse_ups_tracking, parse_usps_tracking
+from .parsers import parse_estes_tracking, parse_ups_tracking, parse_usps_tracking
 
 logger = logging.getLogger(__name__)
 
 
 async def _fetch_usps(page, tracking_number: str) -> dict[str, Any]:
     """Fetch USPS tracking data from a ready page."""
-    url = get_tracking_url("usps", tracking_number)
-    await goto_tracking_page(page, url, timeout_ms=60000)
+    from .navigation import dismiss_usps_overlays, warmup_usps_session
 
-    if not await wait_for_usps_tracking(page, timeout_ms=45000):
-        title = await page.title()
-        if "access denied" in title.lower():
-            return {"error": "USPS blocked automated access (Access Denied)"}
-        content = await page.content()
-        if "bm-verify" in content.lower():
-            return {"error": "USPS Akamai challenge not bypassed"}
-        return {"error": "USPS tracking content not found"}
+    await warmup_usps_session(page)
 
-    return await parse_usps_tracking(page)
+    urls = [
+        get_tracking_url("usps", tracking_number),
+        # Official deep-link used by Informed Delivery / USPS UI
+        f"https://tools.usps.com/tracking/?qtc_tLabels1={tracking_number}",
+    ]
+
+    last_error = "USPS tracking content not found"
+    for index, url in enumerate(urls):
+        await goto_tracking_page(page, url, timeout_ms=60000)
+        await dismiss_usps_overlays(page)
+
+        if await wait_for_usps_tracking(page, timeout_ms=60000):
+            return await parse_usps_tracking(page)
+
+        title = (await page.title()).lower()
+        content = (await page.content()).lower()
+        if "access denied" in title:
+            last_error = "USPS blocked automated access (Access Denied)"
+        elif "bm-verify" in content or "interstitialchallenge" in content:
+            last_error = "USPS Akamai challenge not bypassed"
+        else:
+            last_error = "USPS tracking content not found"
+
+        if index + 1 < len(urls):
+            logger.info("USPS primary URL failed (%s); trying alternate deep-link", last_error)
+
+    return {"error": last_error}
 
 
 async def _fetch_ups(page, tracking_number: str) -> dict[str, Any]:
@@ -64,10 +83,28 @@ async def _fetch_fedex(page, tracking_number: str) -> dict[str, Any]:
     return {"error": "FedEx scraping not yet implemented"}
 
 
+async def _fetch_estes(page, tracking_number: str) -> dict[str, Any]:
+    """Fetch Estes Express tracking data from My Estes shipment tracking."""
+    url = get_tracking_url("estes", tracking_number)
+    await goto_tracking_page(page, url, timeout_ms=60000)
+
+    state = await wait_for_estes_tracking(page, timeout_ms=45000)
+    if state == "not_found":
+        return {"error": "Not found or tracking information unavailable"}
+    if state != "ready":
+        content = (await page.content()).lower()
+        if "not found or tracking information unavailable" in content:
+            return {"error": "Not found or tracking information unavailable"}
+        return {"error": "Estes tracking content not found"}
+
+    return await parse_estes_tracking(page)
+
+
 _FETCH_FUNCTIONS = {
     "usps": _fetch_usps,
     "ups": _fetch_ups,
     "fedex": _fetch_fedex,
+    "estes": _fetch_estes,
 }
 
 
@@ -101,6 +138,18 @@ async def fetch_carrier_tracking(
         async with get_page(timeout_ms=70000) as page:
             return await fetch_fn(page, normalized)
 
+    def _needs_browser_retry(payload: dict[str, Any]) -> bool:
+        err = (payload.get("error") or "").lower()
+        return any(
+            marker in err
+            for marker in (
+                "akamai",
+                "access denied",
+                "tracking content not found",
+                "blocked automated",
+            )
+        )
+
     try:
         result = await _do_fetch()
     except Exception as exc:
@@ -125,6 +174,20 @@ async def fetch_carrier_tracking(
         else:
             logger.error("%s fetch failed for %s: %s", carrier.upper(), normalized, exc)
             return {"error": str(exc)}
+
+    # USPS (and occasionally UPS) can stick on a cold Akamai/browser state —
+    # one full browser reset often clears it in Home Assistant containers.
+    if carrier == "usps" and _needs_browser_retry(result) and not (result.get("events") or []):
+        logger.warning(
+            "USPS fetch blocked (%s); resetting browser and retrying once",
+            result.get("error"),
+        )
+        await reset_browser_on_failure()
+        try:
+            result = await _do_fetch()
+        except Exception as retry_exc:
+            logger.error("USPS browser-reset retry failed for %s: %s", normalized, retry_exc)
+            return {"error": str(retry_exc)}
 
     events = result.get("events") or []
     logger.info(

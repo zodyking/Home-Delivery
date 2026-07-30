@@ -27,6 +27,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     },
     "mail": {
         "accounts": [],
+        "history": {},
     },
     "media_players": [],
     "announcement_players": {},
@@ -307,6 +308,108 @@ class ConfigStore:
             "last_error": last_error,
         }
         await self.update_mail_account(account_id, updates)
+
+    async def get_mail_history(self) -> dict[str, Any]:
+        """Return mail history keyed by YYYY-MM-DD."""
+        config = await self.load()
+        history = config.get("mail", {}).get("history") or {}
+        return copy.deepcopy(history if isinstance(history, dict) else {})
+
+    async def upsert_mail_history_day(self, day: dict[str, Any]) -> dict[str, Any]:
+        """Insert or replace a single history day entry (account-scoped merge)."""
+        date_key = str(day.get("date") or "").strip()
+        if not date_key:
+            raise ValueError("History day requires a date")
+
+        # Ensure config is loaded before taking the write lock (load() also locks).
+        if self._config is None:
+            await self.load()
+
+        async with self._lock:
+            mail = self._config.setdefault("mail", {"accounts": [], "history": {}})
+            history = mail.setdefault("history", {})
+            if not isinstance(history, dict):
+                history = {}
+                mail["history"] = history
+
+            existing = history.get(date_key) or {}
+            account_id = day.get("account_id")
+
+            # Replace this account's letters on re-sync so filenames/OCR don't pile up.
+            prior_letters = list(existing.get("letters") or [])
+            if account_id:
+                merged_letters = [
+                    letter for letter in prior_letters
+                    if letter.get("account_id") != account_id
+                ]
+            else:
+                merged_letters = list(prior_letters)
+
+            seen_images = {letter.get("image") for letter in merged_letters if letter.get("image")}
+            for letter in day.get("letters") or []:
+                image = letter.get("image")
+                if image and image in seen_images:
+                    continue
+                stamped = dict(letter)
+                if account_id:
+                    stamped["account_id"] = account_id
+                merged_letters.append(stamped)
+                if image:
+                    seen_images.add(image)
+
+            # Per-account counts avoid double-counting when the same account syncs again.
+            by_account = dict(existing.get("by_account") or {})
+            day_counts = {
+                "mailpiece_count": int(day.get("mailpiece_count") or 0),
+                "package_count": int(day.get("package_count") or 0),
+                "piece_count": int(day.get("piece_count") or (
+                    int(day.get("mailpiece_count") or 0) + int(day.get("package_count") or 0)
+                )),
+            }
+            if account_id:
+                by_account[str(account_id)] = day_counts
+                account_ids = sorted(by_account.keys())
+                mailpiece_count = sum(int(v.get("mailpiece_count") or 0) for v in by_account.values())
+                package_count = sum(int(v.get("package_count") or 0) for v in by_account.values())
+                piece_count = mailpiece_count + package_count
+            else:
+                account_ids = list(existing.get("account_ids") or [])
+                mailpiece_count = day_counts["mailpiece_count"]
+                package_count = day_counts["package_count"]
+                piece_count = day_counts["piece_count"]
+
+            tracking = list(existing.get("tracking_numbers") or [])
+            for tn in day.get("tracking_numbers") or []:
+                if tn and tn not in tracking:
+                    tracking.append(tn)
+
+            entry = {
+                "date": date_key,
+                "mailpiece_count": mailpiece_count,
+                "package_count": package_count,
+                "piece_count": piece_count,
+                "letters": merged_letters,
+                "preview_images": [
+                    letter.get("image") for letter in merged_letters if letter.get("image")
+                ],
+                "tracking_numbers": tracking,
+                "account_ids": account_ids,
+                "by_account": by_account,
+            }
+
+            history[date_key] = entry
+            # Keep at most ~45 days of history
+            for old_key in sorted(history.keys())[:-45]:
+                history.pop(old_key, None)
+
+            await self._save_locked()
+            return copy.deepcopy(entry)
+
+    async def replace_mail_history(self, days: list[dict[str, Any]]) -> dict[str, Any]:
+        """Replace/merge a batch of history days (used by 30-day backfill)."""
+        for day in days:
+            await self.upsert_mail_history_day(day)
+        return await self.get_mail_history()
 
 
 # Global singleton
