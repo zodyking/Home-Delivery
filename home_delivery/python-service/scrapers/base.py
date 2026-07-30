@@ -29,8 +29,9 @@ def _browser_identity(browser: Browser) -> dict[str, str]:
     """
     Build UA / Client Hints that match the real Playwright Chromium build.
 
-    Spoofing a newer Chrome (e.g. 150) while running Chromium 143 trips
-    Akamai on tools.usps.com, especially from Linux addon containers.
+    Linux HA containers scrape like local Windows dev when we use a Windows
+    Chrome fingerprint (same Chromium major). Linux UA often leaves UPS on
+    skeleton HTML and triggers HTTP/2 errors on ups.com warm-up navigations.
     """
     version = getattr(browser, "version", "") or "143.0.0.0"
     major = _chrome_major(version)
@@ -38,15 +39,16 @@ def _browser_identity(browser: Browser) -> dict[str, str]:
     # 143.0.7499.4 makes UPS drop trackdetails and never render history.
     ua_version = f"{major}.0.0.0"
     system = platform.system()
+    use_windows_profile = system in ("Linux", "Windows")
 
-    if system == "Linux":
+    if use_windows_profile:
         ua = (
-            f"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+            f"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
             f"(KHTML, like Gecko) Chrome/{ua_version} Safari/537.36"
         )
-        ch_platform = '"Linux"'
-        ua_platform = "Linux"
-        platform_version = "6.5.0"
+        ch_platform = '"Windows"'
+        ua_platform = "Windows"
+        platform_version = "15.0.0"
     elif system == "Darwin":
         ua = (
             f"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
@@ -207,6 +209,7 @@ async def get_page(timeout_ms: int = 30000) -> AsyncGenerator[Page, None]:
                 "Sec-Ch-Ua-Platform": identity["sec_ch_ua_platform"],
             },
             ignore_https_errors=True,
+            **({"timezone_id": "America/New_York"} if platform.system() == "Linux" else {}),
         )
         context.set_default_timeout(timeout_ms)
 

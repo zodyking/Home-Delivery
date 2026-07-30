@@ -31,7 +31,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Code version for deployment verification
-CODE_VERSION = "0.0.15"
+CODE_VERSION = "0.0.25"
 
 app = FastAPI(title="Home Delivery API")
 

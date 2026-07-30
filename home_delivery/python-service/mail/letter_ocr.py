@@ -9,7 +9,10 @@ from __future__ import annotations
 import logging
 import re
 from io import BytesIO
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from PIL import Image
 
 from mail.image_enhance import enhance_mail_preview
 
@@ -80,8 +83,8 @@ def _ocr_available() -> bool:
         return False
 
 
-def _preprocess_for_ocr(img: Image.Image) -> Image.Image:
-    from PIL import ImageFilter, ImageOps
+def _preprocess_for_ocr(img: "Image.Image") -> "Image.Image":
+    from PIL import Image, ImageFilter, ImageOps
 
     enhanced = enhance_mail_preview(img)
     gray = ImageOps.grayscale(enhanced)

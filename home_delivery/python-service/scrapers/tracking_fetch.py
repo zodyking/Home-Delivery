@@ -26,7 +26,6 @@ from .navigation import (
     wait_for_estes_tracking,
     wait_for_ups_tracking,
     wait_for_usps_tracking,
-    warmup_ups_session,
 )
 from .parsers import parse_estes_tracking, parse_ups_tracking, parse_usps_tracking
 
@@ -41,6 +40,20 @@ CARRIER_FETCH_TIMEOUTS: dict[str, float] = {
 
 UPS_WAIT_MS = 45000
 UPS_PAGE_TIMEOUT_MS = 75000
+
+
+def _needs_browser_retry(payload: dict[str, Any]) -> bool:
+    err = (payload.get("error") or "").lower()
+    return any(
+        marker in err
+        for marker in (
+            "akamai",
+            "access denied",
+            "tracking content not found",
+            "blocked automated",
+            "timed out",
+        )
+    )
 
 
 async def _fetch_usps(page, tracking_number: str) -> dict[str, Any]:
@@ -80,32 +93,17 @@ async def _fetch_usps(page, tracking_number: str) -> dict[str, Any]:
 
 async def _fetch_ups(page, tracking_number: str) -> dict[str, Any]:
     """
-    Fetch UPS tracking — same fast path as the local test script.
+    Single-pass UPS fetch — same path as agent files/test_tracking_scrape.py.
 
-    One direct track-details URL, ~45s wait (with in-loop skeleton reload),
-    then a single warm-up retry if the container stayed on skeleton HTML.
+    No ups.com warm-up (often ERR_HTTP2_PROTOCOL_ERROR in HA containers and
+    wastes half the timeout budget without helping the track-details page).
     """
     url = get_tracking_url("ups", tracking_number)
+    await goto_tracking_page(page, url, timeout_ms=UPS_WAIT_MS)
+    await prepare_ups_tracking_page(page, tracking_number)
 
-    async def _scrape_once(*, warmed: bool) -> dict[str, Any] | None:
-        if warmed:
-            await warmup_ups_session(page)
-
-        await goto_tracking_page(page, url, timeout_ms=UPS_WAIT_MS)
-        await prepare_ups_tracking_page(page, tracking_number)
-
-        if await wait_for_ups_tracking(page, tracking_number, timeout_ms=UPS_WAIT_MS):
-            return await parse_ups_tracking(page)
-        return None
-
-    parsed = await _scrape_once(warmed=False)
-    if parsed:
-        return parsed
-
-    logger.info("UPS direct fetch missed for %s; retrying after warm-up session", tracking_number)
-    parsed = await _scrape_once(warmed=True)
-    if parsed:
-        return parsed
+    if await wait_for_ups_tracking(page, tracking_number, timeout_ms=UPS_WAIT_MS):
+        return await parse_ups_tracking(page)
 
     return {"error": "UPS tracking content not found"}
 
@@ -162,18 +160,6 @@ async def _fetch_carrier_tracking_impl(
         page_timeout_ms = UPS_PAGE_TIMEOUT_MS if carrier == "ups" else 70000
         async with get_page(timeout_ms=page_timeout_ms) as page:
             return await fetch_fn(page, normalized)
-
-    def _needs_browser_retry(payload: dict[str, Any]) -> bool:
-        err = (payload.get("error") or "").lower()
-        return any(
-            marker in err
-            for marker in (
-                "akamai",
-                "access denied",
-                "tracking content not found",
-                "blocked automated",
-            )
-        )
 
     try:
         result = await _do_fetch()
@@ -263,25 +249,43 @@ async def fetch_carrier_tracking(
     if timeout is None:
         return await _fetch_carrier_tracking_impl(carrier, normalized)
 
-    try:
-        return await asyncio.wait_for(
-            _fetch_carrier_tracking_impl(carrier, normalized),
-            timeout=timeout,
-        )
-    except asyncio.TimeoutError:
+    async def _run_timed() -> dict[str, Any]:
+        try:
+            return await asyncio.wait_for(
+                _fetch_carrier_tracking_impl(carrier, normalized),
+                timeout=timeout,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "%s fetch timed out after %.0fs for %s",
+                carrier.upper(),
+                timeout,
+                normalized,
+            )
+            return {
+                "error": (
+                    f"{carrier.upper()} tracking timed out — "
+                    "package saved; will retry on next poll"
+                ),
+                "status": "Pending",
+            }
+
+    result = await _run_timed()
+
+    # Outer retry after hard timeout — inner impl may not get a browser reset.
+    if (
+        carrier == "ups"
+        and not (result.get("events") or [])
+        and _needs_browser_retry(result)
+    ):
         logger.warning(
-            "%s fetch timed out after %.0fs for %s",
-            carrier.upper(),
-            timeout,
-            normalized,
+            "UPS fetch missed after timeout (%s); resetting browser for one retry",
+            result.get("error"),
         )
-        return {
-            "error": (
-                f"{carrier.upper()} tracking timed out — "
-                "package saved; will retry on next poll"
-            ),
-            "status": "Pending",
-        }
+        await reset_browser_on_failure()
+        result = await _run_timed()
+
+    return result
 
 
 async def fetch_tracking_auto(
