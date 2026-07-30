@@ -1,6 +1,6 @@
 /**
  * Home Delivery Panel - Vanilla JS for HA custom panel / standalone Ingress
- * Theme and auto-save patterns ported from home-weather.
+ * Design aligned with home-weather: topbar + gear settings, dashboard layout.
  */
 class HomeDeliveryPanel extends HTMLElement {
   constructor() {
@@ -9,7 +9,8 @@ class HomeDeliveryPanel extends HTMLElement {
     this._config = null;
     this._loading = false;
     this._error = null;
-    this._currentView = "packages";
+    this._currentView = "dashboard";
+    this._settingsReturnView = "dashboard";
     this._settingsPane = "general";
     this._packages = [];
     this._mailState = null;
@@ -24,6 +25,7 @@ class HomeDeliveryPanel extends HTMLElement {
     this._addPackageModal = false;
     this._selectedPackage = null;
     this._refreshingPackage = null;
+    this._refreshingAll = false;
   }
 
   get _isNarrow() {
@@ -45,11 +47,30 @@ class HomeDeliveryPanel extends HTMLElement {
   }
 
   // ============================================================================
+  // Navigation (ported from home-weather)
+  // ============================================================================
+
+  _navigateTo(view) {
+    if (view === "settings") {
+      this._settingsReturnView = this._currentView || "dashboard";
+    }
+    if (this._currentView === "settings") {
+      this._syncSettingsFromForm();
+    }
+    this._currentView = view;
+    this._render();
+  }
+
+  _openSettingsPane(pane) {
+    this._settingsPane = pane;
+    this._navigateTo("settings");
+  }
+
+  // ============================================================================
   // API Communication
   // ============================================================================
 
   _getApiBase() {
-    // Ingress path detection for HA add-on
     const path = window.location.pathname;
     const match = path.match(/^(\/api\/hassio_ingress\/[^/]+)/);
     return match ? match[1] : "";
@@ -89,7 +110,6 @@ class HomeDeliveryPanel extends HTMLElement {
       this._mediaPlayers = entitiesResp.media_players || [];
       this._ttsEntities = entitiesResp.tts_entities || [];
 
-      // Restore appearance
       if (this._settings.appearance && this._settings.appearance.mode) {
         this._settings.appearance = {
           mode: this._settings.appearance.mode === "light" ? "light" : "dark",
@@ -149,8 +169,30 @@ class HomeDeliveryPanel extends HTMLElement {
     }
   }
 
+  async _refreshAll() {
+    this._refreshingAll = true;
+    this._render();
+    try {
+      const [mailResp] = await Promise.all([
+        this._fetchApi("/api/mail/refresh", { method: "POST" }).then(() => this._fetchApi("/api/mail")).catch(() => this._mailState),
+        ...this._packages.filter(p => !p.delivered).map(p =>
+          this._fetchApi(`/api/packages/${p.id}/refresh`, { method: "POST" })
+            .then(resp => { if (resp.package) { const idx = this._packages.findIndex(x => x.id === p.id); if (idx >= 0) this._packages[idx] = resp.package; } })
+            .catch(() => {})
+        ),
+      ]);
+      if (mailResp) this._mailState = mailResp;
+      this._showToast("Refreshed");
+    } catch (err) {
+      this._showToast(err.message, { error: true });
+    } finally {
+      this._refreshingAll = false;
+      this._render();
+    }
+  }
+
   // ============================================================================
-  // Theme System (ported from home-weather)
+  // Theme System
   // ============================================================================
 
   _readStoredAppearance() {
@@ -193,43 +235,43 @@ class HomeDeliveryPanel extends HTMLElement {
   _themeBase(mode) {
     if (mode === "light") {
       return {
-        bg: "#f8fafc",
+        bg: "#f5f5f5",
         surface: "#ffffff",
-        surface2: "#f1f5f9",
+        surface2: "#f0f0f0",
         elevated: "#ffffff",
         inputBg: "#ffffff",
-        text: "#0f172a",
-        muted: "#64748b",
-        disabled: "#94a3b8",
-        accent: "#0ea5e9",
-        accentHover: "#0284c7",
-        accentDim: "rgba(14, 165, 233, 0.12)",
-        danger: "#ef4444",
-        warning: "#f59e0b",
-        success: "#22c55e",
-        border: "#e2e8f0",
-        borderStrong: "#cbd5e1",
-        hover: "#f1f5f9",
+        text: "#1a1a1a",
+        muted: "#666666",
+        disabled: "#999999",
+        accent: "#03a9f4",
+        accentHover: "#29b6f6",
+        accentDim: "rgba(3, 169, 244, 0.12)",
+        danger: "#f44336",
+        warning: "#ff9800",
+        success: "#4caf50",
+        border: "#e0e0e0",
+        borderStrong: "#bdbdbd",
+        hover: "#eeeeee",
       };
     }
     return {
-      bg: "#0d1117",
-      surface: "#161b22",
-      surface2: "#1c2128",
-      elevated: "#21262d",
-      inputBg: "#0d1117",
-      text: "#e6edf3",
-      muted: "#8b949e",
+      bg: "#111111",
+      surface: "#1c1c1c",
+      surface2: "#161616",
+      elevated: "#282828",
+      inputBg: "#282828",
+      text: "#e1e1e1",
+      muted: "#9b9b9b",
       disabled: "#6e7681",
-      accent: "#58a6ff",
-      accentHover: "#79b8ff",
-      accentDim: "rgba(88, 166, 255, 0.15)",
-      danger: "#f85149",
-      warning: "#d29922",
-      success: "#3fb950",
-      border: "#30363d",
-      borderStrong: "#484f58",
-      hover: "#1c2128",
+      accent: "#03a9f4",
+      accentHover: "#29b6f6",
+      accentDim: "rgba(3, 169, 244, 0.15)",
+      danger: "#f44336",
+      warning: "#ff9800",
+      success: "#4caf50",
+      border: "#252525",
+      borderStrong: "#333333",
+      hover: "#222222",
     };
   }
 
@@ -237,7 +279,7 @@ class HomeDeliveryPanel extends HTMLElement {
     const h = String(hex || "").replace("#", "");
     const full = h.length === 3 ? h.split("").map(c => c + c).join("") : h;
     const int = parseInt(full, 16);
-    if (Number.isNaN(int) || full.length !== 6) return `rgba(88, 166, 255, ${alpha})`;
+    if (Number.isNaN(int) || full.length !== 6) return `rgba(3, 169, 244, ${alpha})`;
     const r = (int >> 16) & 255, g = (int >> 8) & 255, b = int & 255;
     return `rgba(${r}, ${g}, ${b}, ${alpha})`;
   }
@@ -300,15 +342,15 @@ class HomeDeliveryPanel extends HTMLElement {
 
     const shadows = mode === "light"
       ? {
-          sm: "0 1px 2px rgba(15, 23, 42, 0.05)",
-          base: "0 1px 2px rgba(15, 23, 42, 0.05), 0 2px 6px rgba(15, 23, 42, 0.06)",
-          md: "0 2px 8px rgba(15, 23, 42, 0.08), 0 1px 3px rgba(15, 23, 42, 0.05)",
-          lg: "0 12px 32px rgba(15, 23, 42, 0.12), 0 4px 8px rgba(15, 23, 42, 0.06)",
+          sm: "0 1px 2px rgba(0, 0, 0, 0.05)",
+          base: "0 1px 3px rgba(0, 0, 0, 0.08)",
+          md: "0 4px 12px rgba(0, 0, 0, 0.1)",
+          lg: "0 12px 32px rgba(0, 0, 0, 0.12)",
         }
       : {
-          sm: "0 1px 2px rgba(0, 0, 0, 0.3)",
-          base: "0 2px 8px rgba(0, 0, 0, 0.35)",
-          md: "0 4px 16px rgba(0, 0, 0, 0.35)",
+          sm: "0 1px 2px rgba(0, 0, 0, 0.4)",
+          base: "0 2px 8px rgba(0, 0, 0, 0.4)",
+          md: "0 4px 16px rgba(0, 0, 0, 0.4)",
           lg: "0 12px 40px rgba(0, 0, 0, 0.5)",
         };
     set("--shadow-sm", shadows.sm);
@@ -320,7 +362,7 @@ class HomeDeliveryPanel extends HTMLElement {
   }
 
   // ============================================================================
-  // Auto-Save (ported from home-weather)
+  // Auto-Save
   // ============================================================================
 
   _scheduleAutoSave() {
@@ -333,13 +375,6 @@ class HomeDeliveryPanel extends HTMLElement {
     }, 800);
   }
 
-  _isEditingField() {
-    const active = this.shadowRoot?.activeElement;
-    if (!active) return false;
-    const tag = active.tagName;
-    return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT";
-  }
-
   async _saveSettings({ silent = false } = {}) {
     if (this._autoSaveTimer) { clearTimeout(this._autoSaveTimer); this._autoSaveTimer = null; }
     this._syncSettingsFromForm();
@@ -348,23 +383,23 @@ class HomeDeliveryPanel extends HTMLElement {
     this._setSaveStatus("saving", "Saving\u2026");
     try {
       await this._saveConfig(snapshot);
-      this._setSaveStatus("saved", "All changes saved");
-      if (!silent) this._showToast("\u2713 Saved");
+      this._setSaveStatus("saved", "Saved");
+      if (!silent) this._showToast("Saved");
       setTimeout(() => this._setSaveStatus("idle", ""), 2500);
     } catch (e) {
       console.error("Save failed:", e);
       this._setSaveStatus("error", "Save failed");
-      this._showToast("\u26a0 Save failed", { error: true });
+      this._showToast("Save failed", { error: true });
     }
   }
 
   _setSaveStatus(status, text) {
     this._saveStatus = status;
     this._saveStatusText = text;
-    const el = this.shadowRoot?.querySelector(".save-status");
+    const el = this.shadowRoot?.querySelector("#settings-save-status");
     if (el) {
       el.textContent = text;
-      el.className = `save-status ${status}`;
+      el.dataset.state = status;
     }
   }
 
@@ -387,7 +422,6 @@ class HomeDeliveryPanel extends HTMLElement {
     const s = this.shadowRoot;
     if (!s) return;
 
-    // Mail settings
     const mailEnabled = s.querySelector("#mail-enabled");
     const imapHost = s.querySelector("#imap-host");
     const imapPort = s.querySelector("#imap-port");
@@ -405,7 +439,6 @@ class HomeDeliveryPanel extends HTMLElement {
     }
     if (imapFolder) this._settings.mail.folder = imapFolder.value;
 
-    // TTS settings
     const ttsEnabled = s.querySelector("#tts-enabled");
     const ttsStatusChange = s.querySelector("#tts-status-change");
     const ttsOutForDelivery = s.querySelector("#tts-out-for-delivery");
@@ -423,7 +456,6 @@ class HomeDeliveryPanel extends HTMLElement {
     if (ttsStartTime) this._settings.tts.start_time = ttsStartTime.value;
     if (ttsEndTime) this._settings.tts.end_time = ttsEndTime.value;
 
-    // Polling settings
     const defaultInterval = s.querySelector("#polling-default");
     const ofdInterval = s.querySelector("#polling-ofd");
 
@@ -433,7 +465,7 @@ class HomeDeliveryPanel extends HTMLElement {
   }
 
   // ============================================================================
-  // Carrier Badge Helper
+  // Helpers
   // ============================================================================
 
   _carrierBadge(carrier) {
@@ -453,6 +485,10 @@ class HomeDeliveryPanel extends HTMLElement {
     return "in-transit";
   }
 
+  _esc(s) {
+    return String(s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  }
+
   // ============================================================================
   // Render
   // ============================================================================
@@ -462,29 +498,51 @@ class HomeDeliveryPanel extends HTMLElement {
     if (!s) return;
     this._applyTheme();
 
+    if (this._currentView === "settings") {
+      s.innerHTML = `
+        <style>${this._getStyles()}</style>
+        <div class="settings-view ${this._isNarrow ? "narrow" : ""}">
+          ${this._renderSettingsMenubar()}
+          <div class="settings-body">
+            ${this._renderSettingsContent()}
+          </div>
+        </div>
+        ${this._addPackageModal ? this._renderAddPackageModal() : ""}
+      `;
+      this._bindEvents();
+      this._attachSettingsHandlers();
+      return;
+    }
+
     s.innerHTML = `
       <style>${this._getStyles()}</style>
-      <div class="app">
-        <header class="header">
-          <h1 class="logo">
-            <svg viewBox="0 0 24 24" width="28" height="28" fill="currentColor">
-              <path d="M20 8h-3V6c0-1.1-.9-2-2-2H9c-1.1 0-2 .9-2 2v2H4c-1.1 0-2 .9-2 2v10h20V10c0-1.1-.9-2-2-2zM9 6h6v2H9V6zm11 12H4v-3h16v3z"/>
-            </svg>
-            Home Delivery
-          </h1>
-          <nav class="nav">
-            <button class="nav-btn ${this._currentView === "packages" ? "active" : ""}" data-view="packages">Packages</button>
-            <button class="nav-btn ${this._currentView === "mail" ? "active" : ""}" data-view="mail">Mail</button>
-            <button class="nav-btn ${this._currentView === "settings" ? "active" : ""}" data-view="settings">Settings</button>
-          </nav>
-        </header>
-        <main class="main">
-          ${this._loading ? this._renderLoading() : ""}
-          ${this._error ? this._renderError() : ""}
-          ${!this._loading && !this._error ? this._renderView() : ""}
-        </main>
-        ${this._addPackageModal ? this._renderAddPackageModal() : ""}
+      <div class="hud-wrapper">
+        <div class="delivery-app">
+          <header class="topbar">
+            ${this._isNarrow ? `<button class="hamburger icon-btn" id="hamburger-btn" aria-label="Menu">
+              <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M3 18h18v-2H3v2zm0-5h18v-2H3v2zm0-7v2h18V6H3z"/></svg>
+            </button>` : ""}
+            <section class="title-card">
+              <div class="title-wrap">
+                <div class="title">Home Delivery</div>
+              </div>
+            </section>
+            <button class="icon-btn" id="refresh-btn" aria-label="Refresh" ${this._refreshingAll ? "disabled" : ""}>
+              <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor" class="${this._refreshingAll ? "spinning" : ""}"><path d="M17.65 6.35A7.958 7.958 0 0012 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08A5.99 5.99 0 0112 18c-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/></svg>
+            </button>
+            <button class="icon-btn" id="gear-btn" aria-label="Settings">
+              <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 00.12-.61l-1.92-3.32a.488.488 0 00-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.484.484 0 00-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58a.49.49 0 00-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/></svg>
+            </button>
+          </header>
+          <div class="content-area">
+            ${this._loading ? this._renderLoading() : ""}
+            ${this._error && !this._loading ? this._renderError() : ""}
+            ${!this._loading && !this._error ? this._renderDashboard() : ""}
+          </div>
+        </div>
       </div>
+      ${this._addPackageModal ? this._renderAddPackageModal() : ""}
+      ${this._selectedPackage ? this._renderPackageDetail() : ""}
     `;
 
     this._bindEvents();
@@ -492,64 +550,143 @@ class HomeDeliveryPanel extends HTMLElement {
 
   _renderLoading() {
     return `
-      <div class="loading">
-        <div class="spinner"></div>
-        <p>Loading...</p>
-      </div>
+      <section class="dashboard">
+        <article class="glass card dashboard-message">
+          <div class="loading">
+            <div class="spinner"></div>
+            <p>Loading...</p>
+          </div>
+        </article>
+      </section>
     `;
   }
 
   _renderError() {
     return `
-      <div class="error-box">
-        <p>Error: ${this._error}</p>
-        <button class="btn" onclick="location.reload()">Retry</button>
-      </div>
+      <section class="dashboard">
+        <article class="glass card dashboard-message">
+          <div class="error">
+            <p>${this._esc(this._error)}</p>
+            <button class="btn btn-primary" data-action="retry">Retry</button>
+          </div>
+        </article>
+      </section>
     `;
   }
 
-  _renderView() {
-    switch (this._currentView) {
-      case "packages": return this._renderPackagesView();
-      case "mail": return this._renderMailView();
-      case "settings": return this._renderSettingsView();
-      default: return "";
-    }
+  _renderDashboard() {
+    return `
+      <section class="dashboard">
+        ${this._renderMailHero()}
+        ${this._renderPackagesSection()}
+        ${this._renderDeliveredSection()}
+      </section>
+    `;
   }
 
-  _renderPackagesView() {
-    const active = this._packages.filter(p => !p.delivered);
-    const delivered = this._packages.filter(p => p.delivered);
+  _renderMailHero() {
+    const mail = this._mailState || {};
+    const configured = mail.configured;
+    const enabled = mail.enabled;
+
+    if (!configured) {
+      return `
+        <article class="glass card mail-hero-card">
+          <div class="mail-hero-message">
+            <svg viewBox="0 0 24 24" width="48" height="48" fill="currentColor" style="opacity:0.3"><path d="M20 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 4l-8 5-8-5V6l8 5 8-5v2z"/></svg>
+            <p>Mail tracking is not configured</p>
+            <button class="btn btn-primary" data-action="configure-mail">Configure IMAP</button>
+          </div>
+        </article>
+      `;
+    }
+
+    if (!enabled) {
+      return `
+        <article class="glass card mail-hero-card">
+          <div class="mail-hero-message">
+            <svg viewBox="0 0 24 24" width="48" height="48" fill="currentColor" style="opacity:0.3"><path d="M20 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 4l-8 5-8-5V6l8 5 8-5v2z"/></svg>
+            <p>Mail tracking is disabled</p>
+            <button class="btn btn-primary" data-action="configure-mail">Enable in Settings</button>
+          </div>
+        </article>
+      `;
+    }
+
+    const lastCheckStr = mail.last_check ? new Date(mail.last_check).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : "";
 
     return `
-      <div class="packages-view">
-        <div class="section-header">
-          <h2>Active Packages (${active.length})</h2>
-          <button class="btn btn-primary" data-action="add-package">+ Add Package</button>
+      <article class="glass card mail-hero-card">
+        <div class="card-head">
+          <div>
+            <div class="card-title">Mail Today</div>
+            <div class="card-sub">USPS Informed Delivery</div>
+          </div>
+          <button class="btn btn-sm" data-action="refresh-mail">Check Now</button>
         </div>
-        ${active.length === 0 ? `
-          <div class="empty-state">
-            <svg viewBox="0 0 24 24" width="48" height="48" fill="currentColor" style="opacity:0.3">
-              <path d="M20 8h-3V6c0-1.1-.9-2-2-2H9c-1.1 0-2 .9-2 2v2H4c-1.1 0-2 .9-2 2v10h20V10c0-1.1-.9-2-2-2zM9 6h6v2H9V6zm11 12H4v-3h16v3z"/>
-            </svg>
-            <p>No packages being tracked</p>
-            <p class="muted">Click "Add Package" to start tracking</p>
+        <div class="mail-hero-body">
+          <div class="mail-hero-main">
+            <div class="mail-count-large">${mail.piece_count || 0}</div>
+            <div class="mail-count-label">pieces arriving</div>
           </div>
-        ` : `
-          <div class="package-grid">
-            ${active.map(p => this._renderPackageCard(p)).join("")}
+          ${mail.gif_url ? `
+            <div class="mail-preview">
+              <img src="${this._getApiBase()}${mail.gif_url}" alt="Mail Preview" />
+            </div>
+          ` : ""}
+        </div>
+        ${lastCheckStr ? `<div class="mail-meta">Last checked: ${lastCheckStr}</div>` : ""}
+      </article>
+    `;
+  }
+
+  _renderPackagesSection() {
+    const active = this._packages.filter(p => !p.delivered);
+
+    return `
+      <article class="glass card packages-card">
+        <div class="card-head">
+          <div>
+            <div class="card-title">Active Packages</div>
+            <div class="card-sub">${active.length} tracking</div>
           </div>
-        `}
-        ${delivered.length > 0 ? `
-          <div class="section-header" style="margin-top:32px">
-            <h2>Delivered (${delivered.length})</h2>
+          <button class="btn btn-primary btn-sm" data-action="add-package">+ Add Package</button>
+        </div>
+        <div class="packages-body">
+          ${active.length === 0 ? `
+            <div class="empty-state">
+              <svg viewBox="0 0 24 24" width="40" height="40" fill="currentColor" style="opacity:0.3"><path d="M20 8h-3V6c0-1.1-.9-2-2-2H9c-1.1 0-2 .9-2 2v2H4c-1.1 0-2 .9-2 2v10h20V10c0-1.1-.9-2-2-2zM9 6h6v2H9V6zm11 12H4v-3h16v3z"/></svg>
+              <p>No packages being tracked</p>
+              <p class="muted">Click "+ Add Package" to start</p>
+            </div>
+          ` : `
+            <div class="package-grid">
+              ${active.map(p => this._renderPackageCard(p)).join("")}
+            </div>
+          `}
+        </div>
+      </article>
+    `;
+  }
+
+  _renderDeliveredSection() {
+    const delivered = this._packages.filter(p => p.delivered);
+    if (delivered.length === 0) return "";
+
+    return `
+      <article class="glass card delivered-card">
+        <div class="card-head">
+          <div>
+            <div class="card-title">Delivered</div>
+            <div class="card-sub">${delivered.length} packages</div>
           </div>
+        </div>
+        <div class="packages-body">
           <div class="package-grid delivered">
             ${delivered.map(p => this._renderPackageCard(p)).join("")}
           </div>
-        ` : ""}
-      </div>
-      ${this._selectedPackage ? this._renderPackageDetail() : ""}
+        </div>
+      </article>
     `;
   }
 
@@ -559,22 +696,22 @@ class HomeDeliveryPanel extends HTMLElement {
       <div class="package-card ${this._statusClass(pkg)}" data-package-id="${pkg.id}">
         <div class="package-header">
           ${this._carrierBadge(pkg.carrier)}
-          <span class="package-status">${pkg.status || "Pending"}</span>
+          <span class="package-status">${this._esc(pkg.status || "Pending")}</span>
         </div>
-        <div class="package-tracking">${pkg.tracking_number}</div>
-        ${pkg.recipient ? `<div class="package-meta">For: ${pkg.recipient}</div>` : ""}
-        ${pkg.destination ? `<div class="package-meta">To: ${pkg.destination}</div>` : ""}
-        ${pkg.status_detail ? `<div class="package-detail">${pkg.status_detail}</div>` : ""}
+        <div class="package-tracking">${this._esc(pkg.tracking_number)}</div>
+        ${pkg.recipient ? `<div class="package-meta">For: ${this._esc(pkg.recipient)}</div>` : ""}
+        ${pkg.destination ? `<div class="package-meta">To: ${this._esc(pkg.destination)}</div>` : ""}
+        ${pkg.status_detail ? `<div class="package-detail-text">${this._esc(pkg.status_detail)}</div>` : ""}
         ${pkg.events?.length > 0 ? `
           <div class="package-latest">
-            <span class="event-date">${pkg.events[0].date || ""}</span>
-            <span class="event-location">${pkg.events[0].location || ""}</span>
+            <span class="event-date">${this._esc(pkg.events[0].date || "")}</span>
+            <span class="event-location">${this._esc(pkg.events[0].location || "")}</span>
           </div>
         ` : ""}
-        ${pkg.error ? `<div class="package-error">${pkg.error}</div>` : ""}
+        ${pkg.error ? `<div class="package-error">${this._esc(pkg.error)}</div>` : ""}
         <div class="package-actions">
           <button class="btn btn-sm" data-action="refresh" data-id="${pkg.id}" ${isRefreshing ? "disabled" : ""}>
-            ${isRefreshing ? "Refreshing..." : "Refresh"}
+            ${isRefreshing ? "..." : "Refresh"}
           </button>
           <button class="btn btn-sm" data-action="view" data-id="${pkg.id}">Details</button>
           <button class="btn btn-sm btn-danger" data-action="delete" data-id="${pkg.id}">Remove</button>
@@ -590,24 +727,24 @@ class HomeDeliveryPanel extends HTMLElement {
       <div class="modal-backdrop" data-action="close-detail">
         <div class="modal" onclick="event.stopPropagation()">
           <div class="modal-header">
-            <h2>${this._carrierBadge(pkg.carrier)} ${pkg.tracking_number}</h2>
+            <h2>${this._carrierBadge(pkg.carrier)} ${this._esc(pkg.tracking_number)}</h2>
             <button class="close-btn" data-action="close-detail">&times;</button>
           </div>
           <div class="modal-body">
             <div class="detail-row">
               <span class="detail-label">Status</span>
-              <span class="detail-value status-${this._statusClass(pkg)}">${pkg.status || "Pending"}</span>
+              <span class="detail-value status-${this._statusClass(pkg)}">${this._esc(pkg.status || "Pending")}</span>
             </div>
             ${pkg.recipient ? `
               <div class="detail-row">
                 <span class="detail-label">Recipient</span>
-                <span class="detail-value">${pkg.recipient}</span>
+                <span class="detail-value">${this._esc(pkg.recipient)}</span>
               </div>
             ` : ""}
             ${pkg.destination ? `
               <div class="detail-row">
                 <span class="detail-label">Destination</span>
-                <span class="detail-value">${pkg.destination}</span>
+                <span class="detail-value">${this._esc(pkg.destination)}</span>
               </div>
             ` : ""}
             <h3 style="margin-top:20px">Tracking History</h3>
@@ -617,9 +754,9 @@ class HomeDeliveryPanel extends HTMLElement {
                   <div class="timeline-item ${i === 0 ? "current" : ""}">
                     <div class="timeline-marker"></div>
                     <div class="timeline-content">
-                      <div class="timeline-date">${e.date || ""} ${e.time || ""}</div>
-                      <div class="timeline-desc">${e.description || ""}</div>
-                      <div class="timeline-location">${e.location || ""}</div>
+                      <div class="timeline-date">${this._esc(e.date || "")} ${this._esc(e.time || "")}</div>
+                      <div class="timeline-desc">${this._esc(e.description || "")}</div>
+                      <div class="timeline-location">${this._esc(e.location || "")}</div>
                     </div>
                   </div>
                 `).join("")}
@@ -631,172 +768,176 @@ class HomeDeliveryPanel extends HTMLElement {
     `;
   }
 
-  _renderMailView() {
-    const mail = this._mailState || {};
+  _renderSettingsMenubar() {
+    const backLabel = "Back";
     return `
-      <div class="mail-view">
-        <h2>USPS Informed Delivery</h2>
-        ${!mail.configured ? `
-          <div class="info-box">
-            <p>Mail tracking is not configured. Go to Settings &gt; Mail to set up IMAP.</p>
-          </div>
-        ` : !mail.enabled ? `
-          <div class="info-box">
-            <p>Mail tracking is disabled. Enable it in Settings &gt; Mail.</p>
-          </div>
-        ` : `
-          <div class="mail-summary">
-            <div class="mail-count">
-              <span class="count">${mail.piece_count || 0}</span>
-              <span class="label">Mail Pieces Today</span>
-            </div>
-            ${mail.gif_url ? `
-              <div class="mail-preview">
-                <img src="${this._getApiBase()}${mail.gif_url}" alt="Mail Preview" />
-              </div>
-            ` : ""}
-            <div class="mail-meta">
-              ${mail.last_check ? `<p>Last checked: ${new Date(mail.last_check).toLocaleString()}</p>` : ""}
-              <button class="btn" data-action="refresh-mail">Check Now</button>
-            </div>
-          </div>
-        `}
-      </div>
+      <header class="hd-menubar">
+        <button type="button" class="hd-menubar-back" data-action="nav-back" aria-label="${backLabel}">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z"/></svg>
+          <span>${backLabel}</span>
+        </button>
+        <div class="hd-menubar-title">Settings</div>
+        <span class="settings-save-status" id="settings-save-status" role="status" aria-live="polite" data-state="${this._saveStatus}">${this._saveStatusText}</span>
+      </header>
     `;
   }
 
-  _renderSettingsView() {
+  _renderSettingsContent() {
     const mail = this._settings.mail || {};
     const tts = this._settings.tts || {};
     const polling = this._settings.polling || {};
     const { mode } = this._getAppearance();
+    const activePane = this._settingsPane || "general";
+
+    const paneNav = [
+      { id: "general", label: "General", icon: `<svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 3l9 7h-3v9h-4v-6H10v6H6v-9H3l9-7z"/></svg>` },
+      { id: "mail", label: "Mail", icon: `<svg viewBox="0 0 24 24" fill="currentColor"><path d="M20 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 4l-8 5-8-5V6l8 5 8-5v2z"/></svg>` },
+      { id: "announcements", label: "Announcements", icon: `<svg viewBox="0 0 24 24" fill="currentColor"><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3a4.5 4.5 0 00-2.5-4.03v8.05A4.5 4.5 0 0016.5 12zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z"/></svg>` },
+      { id: "appearance", label: "Appearance", icon: `<svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 3a9 9 0 000 18c.83 0 1.5-.67 1.5-1.5 0-.39-.15-.74-.39-1.01-.23-.26-.39-.61-.39-.99 0-.83.67-1.5 1.5-1.5H16a5 5 0 005-5c0-4.42-4.03-8-9-8zm-5.5 9a1.5 1.5 0 110-3 1.5 1.5 0 010 3zm3-4a1.5 1.5 0 110-3 1.5 1.5 0 010 3zm5 0a1.5 1.5 0 110-3 1.5 1.5 0 010 3zm3.5 4a1.5 1.5 0 110-3 1.5 1.5 0 010 3z"/></svg>` },
+    ];
 
     return `
-      <div class="settings-view">
-        <div class="settings-header">
-          <h2>Settings</h2>
-          <span class="save-status ${this._saveStatus}">${this._saveStatusText}</span>
-        </div>
-        <div class="settings-tabs">
-          <button class="tab-btn ${this._settingsPane === "general" ? "active" : ""}" data-pane="general">General</button>
-          <button class="tab-btn ${this._settingsPane === "mail" ? "active" : ""}" data-pane="mail">Mail</button>
-          <button class="tab-btn ${this._settingsPane === "tts" ? "active" : ""}" data-pane="tts">TTS</button>
-          <button class="tab-btn ${this._settingsPane === "appearance" ? "active" : ""}" data-pane="appearance">Appearance</button>
-        </div>
-        <form class="settings-form" onsubmit="return false">
-          ${this._settingsPane === "general" ? `
-            <section class="settings-section">
-              <h3>Polling</h3>
-              <div class="form-group">
-                <label for="polling-default">Default Interval (seconds)</label>
-                <input type="number" id="polling-default" value="${polling.default_interval_seconds || 3600}" min="300" />
-                <p class="hint">How often to check package status (minimum 5 minutes)</p>
+      <div class="settings-form">
+        <div class="settings-shell">
+          <nav class="settings-sidenav" aria-label="Settings sections">
+            ${paneNav.map(p => `<button type="button" class="${activePane === p.id ? "active" : ""}" data-settings-pane="${p.id}">${p.icon}<span>${p.label}</span></button>`).join("")}
+          </nav>
+          <div class="settings-content">
+            <section class="settings-pane ${activePane === "general" ? "active" : ""}" data-settings-pane="general">
+              <div class="settings-pane-head">
+                <div class="settings-pane-title">General</div>
+                <div class="settings-pane-sub">Polling intervals for package tracking</div>
               </div>
-              <div class="form-group">
-                <label for="polling-ofd">Out for Delivery Interval (seconds)</label>
-                <input type="number" id="polling-ofd" value="${polling.out_for_delivery_interval_seconds || 300}" min="60" />
-                <p class="hint">Faster polling when package is out for delivery</p>
-              </div>
-            </section>
-          ` : ""}
-          ${this._settingsPane === "mail" ? `
-            <section class="settings-section">
-              <h3>USPS Informed Delivery</h3>
-              <div class="form-group">
-                <label class="checkbox-label">
-                  <input type="checkbox" id="mail-enabled" ${mail.enabled ? "checked" : ""} />
-                  Enable Mail Tracking
-                </label>
-              </div>
-              <div class="form-group">
-                <label for="imap-host">IMAP Server</label>
-                <input type="text" id="imap-host" value="${mail.imap_host || ""}" placeholder="imap.gmail.com" />
-              </div>
-              <div class="form-group">
-                <label for="imap-port">IMAP Port</label>
-                <input type="number" id="imap-port" value="${mail.imap_port || 993}" />
-              </div>
-              <div class="form-group">
-                <label for="imap-user">Email Address</label>
-                <input type="email" id="imap-user" value="${mail.imap_user || ""}" placeholder="you@example.com" />
-              </div>
-              <div class="form-group">
-                <label for="imap-password">Password / App Password</label>
-                <input type="password" id="imap-password" value="${mail.imap_password ? "********" : ""}" placeholder="App password for Gmail" />
-              </div>
-              <div class="form-group">
-                <label for="imap-folder">Folder</label>
-                <input type="text" id="imap-folder" value="${mail.folder || "INBOX"}" />
-              </div>
-            </section>
-          ` : ""}
-          ${this._settingsPane === "tts" ? `
-            <section class="settings-section">
-              <h3>Text-to-Speech Announcements</h3>
-              <div class="form-group">
-                <label class="checkbox-label">
-                  <input type="checkbox" id="tts-enabled" ${tts.enabled ? "checked" : ""} />
-                  Enable TTS Announcements
-                </label>
-              </div>
-              <h4>Announcement Triggers</h4>
-              <div class="form-group">
-                <label class="checkbox-label">
-                  <input type="checkbox" id="tts-status-change" ${tts.enable_status_change !== false ? "checked" : ""} />
-                  Status Changes
-                </label>
-              </div>
-              <div class="form-group">
-                <label class="checkbox-label">
-                  <input type="checkbox" id="tts-out-for-delivery" ${tts.enable_out_for_delivery !== false ? "checked" : ""} />
-                  Out for Delivery
-                </label>
-              </div>
-              <div class="form-group">
-                <label class="checkbox-label">
-                  <input type="checkbox" id="tts-delivered" ${tts.enable_delivered !== false ? "checked" : ""} />
-                  Delivered
-                </label>
-              </div>
-              <div class="form-group">
-                <label class="checkbox-label">
-                  <input type="checkbox" id="tts-mail-arrived" ${tts.enable_mail_arrived !== false ? "checked" : ""} />
-                  Mail Arrived
-                </label>
-              </div>
-              <h4>Quiet Hours</h4>
-              <div class="form-row">
-                <div class="form-group">
-                  <label for="tts-start-time">Start</label>
-                  <input type="time" id="tts-start-time" value="${tts.start_time || "08:00"}" />
-                </div>
-                <div class="form-group">
-                  <label for="tts-end-time">End</label>
-                  <input type="time" id="tts-end-time" value="${tts.end_time || "21:00"}" />
+              <div class="settings-card">
+                <div class="settings-card-body">
+                  <div class="form-group">
+                    <label for="polling-default">Default Interval (seconds)</label>
+                    <input type="number" id="polling-default" value="${polling.default_interval_seconds || 3600}" min="300" />
+                    <p class="hint">How often to check package status (minimum 5 minutes)</p>
+                  </div>
+                  <div class="form-group">
+                    <label for="polling-ofd">Out for Delivery Interval (seconds)</label>
+                    <input type="number" id="polling-ofd" value="${polling.out_for_delivery_interval_seconds || 300}" min="60" />
+                    <p class="hint">Faster polling when package is out for delivery</p>
+                  </div>
                 </div>
               </div>
-              <p class="hint">Announcements only play between these hours</p>
             </section>
-          ` : ""}
-          ${this._settingsPane === "appearance" ? `
-            <section class="settings-section">
-              <h3>Theme</h3>
-              <div class="theme-toggle">
-                <button type="button" class="theme-btn ${mode === "dark" ? "active" : ""}" data-theme="dark">
-                  <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M12 3a9 9 0 109 9c0-.46-.04-.92-.1-1.36a5.39 5.39 0 01-4.4 2.26 5.4 5.4 0 01-5.4-5.4c0-1.81.9-3.42 2.26-4.4A9.1 9.1 0 0012 3z"/></svg>
-                  Dark
-                </button>
-                <button type="button" class="theme-btn ${mode === "light" ? "active" : ""}" data-theme="light">
-                  <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M12 7c-2.76 0-5 2.24-5 5s2.24 5 5 5 5-2.24 5-5-2.24-5-5-5zM2 13h2c.55 0 1-.45 1-1s-.45-1-1-1H2c-.55 0-1 .45-1 1s.45 1 1 1zm18 0h2c.55 0 1-.45 1-1s-.45-1-1-1h-2c-.55 0-1 .45-1 1s.45 1 1 1zM11 2v2c0 .55.45 1 1 1s1-.45 1-1V2c0-.55-.45-1-1-1s-1 .45-1 1zm0 18v2c0 .55.45 1 1 1s1-.45 1-1v-2c0-.55-.45-1-1-1s-1 .45-1 1zM5.99 4.58a.996.996 0 00-1.41 0 .996.996 0 000 1.41l1.06 1.06c.39.39 1.03.39 1.41 0s.39-1.03 0-1.41L5.99 4.58zm12.37 12.37a.996.996 0 00-1.41 0 .996.996 0 000 1.41l1.06 1.06c.39.39 1.03.39 1.41 0a.996.996 0 000-1.41l-1.06-1.06zm1.06-10.96a.996.996 0 000-1.41.996.996 0 00-1.41 0l-1.06 1.06c-.39.39-.39 1.03 0 1.41s1.03.39 1.41 0l1.06-1.06zM7.05 18.36a.996.996 0 000-1.41.996.996 0 00-1.41 0l-1.06 1.06c-.39.39-.39 1.03 0 1.41s1.03.39 1.41 0l1.06-1.06z"/></svg>
-                  Light
-                </button>
+
+            <section class="settings-pane ${activePane === "mail" ? "active" : ""}" data-settings-pane="mail">
+              <div class="settings-pane-head">
+                <div class="settings-pane-title">Mail</div>
+                <div class="settings-pane-sub">USPS Informed Delivery via IMAP</div>
+              </div>
+              <div class="settings-card">
+                <div class="settings-card-body">
+                  <div class="form-group">
+                    <label class="checkbox-label">
+                      <input type="checkbox" id="mail-enabled" ${mail.enabled ? "checked" : ""} />
+                      Enable Mail Tracking
+                    </label>
+                  </div>
+                  <div class="form-group">
+                    <label for="imap-host">IMAP Server</label>
+                    <input type="text" id="imap-host" value="${this._esc(mail.imap_host || "")}" placeholder="imap.gmail.com" />
+                  </div>
+                  <div class="form-group">
+                    <label for="imap-port">IMAP Port</label>
+                    <input type="number" id="imap-port" value="${mail.imap_port || 993}" />
+                  </div>
+                  <div class="form-group">
+                    <label for="imap-user">Email Address</label>
+                    <input type="email" id="imap-user" value="${this._esc(mail.imap_user || "")}" placeholder="you@example.com" />
+                  </div>
+                  <div class="form-group">
+                    <label for="imap-password">Password / App Password</label>
+                    <input type="password" id="imap-password" value="${mail.imap_password ? "********" : ""}" placeholder="App password for Gmail" />
+                  </div>
+                  <div class="form-group">
+                    <label for="imap-folder">Folder</label>
+                    <input type="text" id="imap-folder" value="${this._esc(mail.folder || "INBOX")}" />
+                  </div>
+                </div>
               </div>
             </section>
-          ` : ""}
-          <div class="form-actions">
-            <button type="button" class="btn btn-primary" data-action="save-settings">Save Settings</button>
+
+            <section class="settings-pane ${activePane === "announcements" ? "active" : ""}" data-settings-pane="announcements">
+              <div class="settings-pane-head">
+                <div class="settings-pane-title">Announcements</div>
+                <div class="settings-pane-sub">Text-to-Speech notifications</div>
+              </div>
+              <div class="settings-card">
+                <div class="settings-card-body">
+                  <div class="form-group">
+                    <label class="checkbox-label">
+                      <input type="checkbox" id="tts-enabled" ${tts.enabled ? "checked" : ""} />
+                      Enable TTS Announcements
+                    </label>
+                  </div>
+                  <h4>Triggers</h4>
+                  <div class="form-group">
+                    <label class="checkbox-label">
+                      <input type="checkbox" id="tts-status-change" ${tts.enable_status_change !== false ? "checked" : ""} />
+                      Status Changes
+                    </label>
+                  </div>
+                  <div class="form-group">
+                    <label class="checkbox-label">
+                      <input type="checkbox" id="tts-out-for-delivery" ${tts.enable_out_for_delivery !== false ? "checked" : ""} />
+                      Out for Delivery
+                    </label>
+                  </div>
+                  <div class="form-group">
+                    <label class="checkbox-label">
+                      <input type="checkbox" id="tts-delivered" ${tts.enable_delivered !== false ? "checked" : ""} />
+                      Delivered
+                    </label>
+                  </div>
+                  <div class="form-group">
+                    <label class="checkbox-label">
+                      <input type="checkbox" id="tts-mail-arrived" ${tts.enable_mail_arrived !== false ? "checked" : ""} />
+                      Mail Arrived
+                    </label>
+                  </div>
+                  <h4>Quiet Hours</h4>
+                  <div class="form-row">
+                    <div class="form-group">
+                      <label for="tts-start-time">Start</label>
+                      <input type="time" id="tts-start-time" value="${tts.start_time || "08:00"}" />
+                    </div>
+                    <div class="form-group">
+                      <label for="tts-end-time">End</label>
+                      <input type="time" id="tts-end-time" value="${tts.end_time || "21:00"}" />
+                    </div>
+                  </div>
+                  <p class="hint">Announcements only play between these hours</p>
+                </div>
+              </div>
+            </section>
+
+            <section class="settings-pane ${activePane === "appearance" ? "active" : ""}" data-settings-pane="appearance">
+              <div class="settings-pane-head">
+                <div class="settings-pane-title">Appearance</div>
+                <div class="settings-pane-sub">Theme customization</div>
+              </div>
+              <div class="settings-card">
+                <div class="settings-card-body">
+                  <h4>Theme</h4>
+                  <div class="theme-toggle">
+                    <button type="button" class="theme-btn ${mode === "dark" ? "active" : ""}" data-theme="dark">
+                      <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M12 3a9 9 0 109 9c0-.46-.04-.92-.1-1.36a5.39 5.39 0 01-4.4 2.26 5.4 5.4 0 01-5.4-5.4c0-1.81.9-3.42 2.26-4.4A9.1 9.1 0 0012 3z"/></svg>
+                      Dark
+                    </button>
+                    <button type="button" class="theme-btn ${mode === "light" ? "active" : ""}" data-theme="light">
+                      <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M12 7c-2.76 0-5 2.24-5 5s2.24 5 5 5 5-2.24 5-5-2.24-5-5-5zM2 13h2c.55 0 1-.45 1-1s-.45-1-1-1H2c-.55 0-1 .45-1 1s.45 1 1 1zm18 0h2c.55 0 1-.45 1-1s-.45-1-1-1h-2c-.55 0-1 .45-1 1s.45 1 1 1zM11 2v2c0 .55.45 1 1 1s1-.45 1-1V2c0-.55-.45-1-1-1s-1 .45-1 1zm0 18v2c0 .55.45 1 1 1s1-.45 1-1v-2c0-.55-.45-1-1-1s-1 .45-1 1zM5.99 4.58a.996.996 0 00-1.41 0 .996.996 0 000 1.41l1.06 1.06c.39.39 1.03.39 1.41 0s.39-1.03 0-1.41L5.99 4.58zm12.37 12.37a.996.996 0 00-1.41 0 .996.996 0 000 1.41l1.06 1.06c.39.39 1.03.39 1.41 0a.996.996 0 000-1.41l-1.06-1.06zm1.06-10.96a.996.996 0 000-1.41.996.996 0 00-1.41 0l-1.06 1.06c-.39.39-.39 1.03 0 1.41s1.03.39 1.41 0l1.06-1.06zM7.05 18.36a.996.996 0 000-1.41.996.996 0 00-1.41 0l-1.06 1.06c-.39.39-.39 1.03 0 1.41s1.03.39 1.41 0l1.06-1.06z"/></svg>
+                      Light
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </section>
           </div>
-        </form>
+        </div>
       </div>
     `;
   }
@@ -821,7 +962,7 @@ class HomeDeliveryPanel extends HTMLElement {
             </div>
             <div class="form-group">
               <label for="destination">Destination</label>
-              <input type="text" id="destination" placeholder="e.g., Home, Work, Grandma's" />
+              <input type="text" id="destination" placeholder="e.g., Home, Work" />
             </div>
             <div class="form-actions">
               <button type="button" class="btn" data-action="close-add">Cancel</button>
@@ -841,39 +982,33 @@ class HomeDeliveryPanel extends HTMLElement {
     const s = this.shadowRoot;
     if (!s) return;
 
-    // Navigation
-    s.querySelectorAll(".nav-btn").forEach(btn => {
-      btn.addEventListener("click", () => {
-        this._currentView = btn.dataset.view;
-        this._render();
-      });
-    });
+    const gearBtn = s.querySelector("#gear-btn");
+    if (gearBtn) gearBtn.addEventListener("click", () => this._navigateTo("settings"));
 
-    // Settings tabs
-    s.querySelectorAll(".tab-btn").forEach(btn => {
-      btn.addEventListener("click", () => {
-        this._settingsPane = btn.dataset.pane;
-        this._render();
-      });
-    });
+    const refreshBtn = s.querySelector("#refresh-btn");
+    if (refreshBtn) refreshBtn.addEventListener("click", () => this._refreshAll());
 
-    // Theme buttons
+    const hamburgerBtn = s.querySelector("#hamburger-btn");
+    if (hamburgerBtn) {
+      hamburgerBtn.addEventListener("click", () => {
+        this.dispatchEvent(new CustomEvent("hass-toggle-menu", { bubbles: true, composed: true }));
+      });
+    }
+
     s.querySelectorAll(".theme-btn").forEach(btn => {
       btn.addEventListener("click", () => {
         if (!this._settings.appearance) this._settings.appearance = {};
         this._settings.appearance.mode = btn.dataset.theme;
         this._applyTheme();
         this._persistAppearance();
-        this._render();
+        s.querySelectorAll(".theme-btn").forEach(b => b.classList.toggle("active", b === btn));
       });
     });
 
-    // Action buttons
     s.querySelectorAll("[data-action]").forEach(el => {
       el.addEventListener("click", (e) => this._handleAction(e, el.dataset.action, el.dataset));
     });
 
-    // Form auto-save
     const form = s.querySelector(".settings-form");
     if (form) {
       const onChange = () => this._scheduleAutoSave();
@@ -881,7 +1016,6 @@ class HomeDeliveryPanel extends HTMLElement {
       form.addEventListener("change", onChange);
     }
 
-    // Add package form
     const addForm = s.querySelector("#add-package-form");
     if (addForm) {
       addForm.addEventListener("submit", async (e) => {
@@ -900,6 +1034,22 @@ class HomeDeliveryPanel extends HTMLElement {
         }
       });
     }
+  }
+
+  _attachSettingsHandlers() {
+    const s = this.shadowRoot;
+    if (!s) return;
+
+    s.querySelectorAll(".settings-sidenav button[data-settings-pane]").forEach(btn => {
+      btn.addEventListener("click", () => {
+        const pane = btn.dataset.settingsPane;
+        this._settingsPane = pane;
+        s.querySelectorAll(".settings-sidenav button[data-settings-pane]")
+          .forEach(b => b.classList.toggle("active", b === btn));
+        s.querySelectorAll(".settings-pane")
+          .forEach(p => p.classList.toggle("active", p.dataset.settingsPane === pane));
+      });
+    });
   }
 
   async _handleAction(e, action, data) {
@@ -941,8 +1091,14 @@ class HomeDeliveryPanel extends HTMLElement {
           this._showToast(err.message, { error: true });
         }
         break;
-      case "save-settings":
-        await this._saveSettings();
+      case "configure-mail":
+        this._openSettingsPane("mail");
+        break;
+      case "nav-back":
+        this._navigateTo(this._settingsReturnView || "dashboard");
+        break;
+      case "retry":
+        this._loadConfig();
         break;
     }
   }
@@ -954,193 +1110,262 @@ class HomeDeliveryPanel extends HTMLElement {
   _getStyles() {
     return `
       :host {
+        --header-height: 64px;
+        --space-1: 4px;
+        --space-2: 8px;
+        --space-3: 12px;
+        --space-4: 16px;
+        --space-5: 24px;
+        --space-6: 32px;
+        --radius-sm: 6px;
+        --radius-md: 8px;
+        --radius-lg: 12px;
+        --radius-xl: 16px;
+        --dur-fast: 0.15s;
+        --dur-normal: 0.25s;
+        --ease: cubic-bezier(0.4, 0, 0.2, 1);
+
         display: block;
         min-height: 100vh;
         background: var(--hd-bg);
         color: var(--hd-text);
         font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        line-height: 1.5;
       }
 
       * { box-sizing: border-box; }
 
-      .app {
-        max-width: 1200px;
+      /* ======================== HUD Wrapper + App Shell ======================== */
+
+      .hud-wrapper {
+        min-height: 100vh;
+        display: flex;
+        flex-direction: column;
+      }
+
+      .delivery-app {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        max-width: 1600px;
+        width: 100%;
         margin: 0 auto;
-        padding: 0 16px;
       }
 
-      /* Header */
-      .header {
+      /* ======================== Topbar ======================== */
+
+      .topbar {
+        position: sticky;
+        top: 0;
+        z-index: 100;
         display: flex;
         align-items: center;
-        justify-content: space-between;
-        padding: 16px 0;
-        border-bottom: 1px solid var(--hd-border);
-        flex-wrap: wrap;
-        gap: 12px;
+        height: var(--header-height);
+        padding: 0 var(--space-4);
+        background: var(--hd-surface);
+        border-bottom: 1px solid var(--hd-border-strong);
+        gap: var(--space-2);
       }
 
-      .logo {
+      .title-card {
+        flex: 1;
+        min-width: 0;
+      }
+
+      .title-wrap {
         display: flex;
         align-items: center;
-        gap: 8px;
-        font-size: 20px;
+        gap: var(--space-2);
+      }
+
+      .title {
+        font-size: clamp(16px, 2vw, 20px);
         font-weight: 600;
-        margin: 0;
         color: var(--hd-accent);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
       }
 
-      .nav {
+      .icon-btn {
         display: flex;
-        gap: 8px;
-      }
-
-      .nav-btn {
-        background: transparent;
-        border: 1px solid var(--hd-border);
-        color: var(--hd-text);
-        padding: 8px 16px;
-        border-radius: 6px;
-        cursor: pointer;
-        font-size: 14px;
-        transition: all 0.15s;
-      }
-
-      .nav-btn:hover {
-        background: var(--hd-hover);
-      }
-
-      .nav-btn.active {
-        background: var(--hd-accent);
-        border-color: var(--hd-accent);
-        color: #fff;
-      }
-
-      /* Main */
-      .main {
-        padding: 24px 0;
-      }
-
-      /* Loading / Error */
-      .loading, .error-box {
-        text-align: center;
-        padding: 48px;
-      }
-
-      .spinner {
+        align-items: center;
+        justify-content: center;
         width: 40px;
         height: 40px;
-        border: 3px solid var(--hd-border);
-        border-top-color: var(--hd-accent);
-        border-radius: 50%;
+        border: 1px solid var(--hd-border-strong);
+        background: var(--hd-input-bg);
+        border-radius: var(--radius-sm);
+        color: var(--hd-text);
+        cursor: pointer;
+        transition: background var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
+        flex-shrink: 0;
+      }
+
+      .icon-btn:hover {
+        background: var(--hd-hover);
+        color: var(--hd-accent-hover);
+      }
+
+      .icon-btn:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
+
+      .icon-btn svg.spinning {
         animation: spin 1s linear infinite;
-        margin: 0 auto 16px;
       }
 
       @keyframes spin {
         to { transform: rotate(360deg); }
       }
 
-      .error-box {
+      .hamburger {
+        display: none;
+      }
+
+      @media (max-width: 768px) {
+        .hamburger { display: flex; }
+      }
+
+      /* ======================== Content Area ======================== */
+
+      .content-area {
+        flex: 1;
+        padding: var(--space-4);
+        padding-bottom: calc(var(--space-5) + env(safe-area-inset-bottom, 0px));
+      }
+
+      .dashboard {
+        display: flex;
+        flex-direction: column;
+        gap: var(--space-4);
+      }
+
+      /* ======================== Glass Cards ======================== */
+
+      .glass {
         background: var(--hd-surface);
-        border: 1px solid var(--hd-danger);
-        border-radius: 8px;
-        color: var(--hd-danger);
+        border: 1px solid var(--hd-border-strong);
+        border-radius: var(--radius-xl);
+        box-shadow: var(--shadow-md);
       }
 
-      /* Buttons */
-      .btn {
-        background: var(--hd-surface);
-        border: 1px solid var(--hd-border);
-        color: var(--hd-text);
-        padding: 10px 16px;
-        border-radius: 6px;
-        cursor: pointer;
-        font-size: 14px;
-        transition: all 0.15s;
+      .card {
+        padding: var(--space-4);
       }
 
-      .btn:hover {
-        background: var(--hd-hover);
-        border-color: var(--hd-border-strong);
-      }
-
-      .btn:disabled {
-        opacity: 0.6;
-        cursor: not-allowed;
-      }
-
-      .btn-primary {
-        background: var(--hd-accent);
-        border-color: var(--hd-accent);
-        color: #fff;
-      }
-
-      .btn-primary:hover {
-        background: var(--hd-accent-hover);
-      }
-
-      .btn-danger {
-        color: var(--hd-danger);
-        border-color: var(--hd-danger);
-      }
-
-      .btn-danger:hover {
-        background: var(--hd-danger);
-        color: #fff;
-      }
-
-      .btn-sm {
-        padding: 6px 12px;
-        font-size: 12px;
-      }
-
-      /* Section Header */
-      .section-header {
+      .card-head {
         display: flex;
         align-items: center;
         justify-content: space-between;
-        margin-bottom: 16px;
+        gap: var(--space-3);
+        margin-bottom: var(--space-4);
       }
 
-      .section-header h2 {
-        font-size: 18px;
+      .card-title {
+        font-size: 16px;
         font-weight: 600;
+        color: var(--hd-text);
+      }
+
+      .card-sub {
+        font-size: 13px;
+        color: var(--hd-muted);
+        margin-top: 2px;
+      }
+
+      .dashboard-message {
+        padding: var(--space-6);
+        text-align: center;
+      }
+
+      /* ======================== Mail Hero ======================== */
+
+      .mail-hero-card {
+        min-height: 160px;
+      }
+
+      .mail-hero-message {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: var(--space-3);
+        padding: var(--space-5) 0;
+        text-align: center;
+      }
+
+      .mail-hero-message p {
+        color: var(--hd-muted);
         margin: 0;
       }
 
-      /* Empty State */
-      .empty-state {
-        text-align: center;
-        padding: 48px;
-        background: var(--hd-surface);
-        border-radius: 12px;
-        border: 1px dashed var(--hd-border);
+      .mail-hero-body {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: var(--space-5);
       }
 
-      .empty-state .muted {
+      .mail-hero-main {
+        flex: 1;
+        min-width: 140px;
+      }
+
+      .mail-count-large {
+        font-size: clamp(48px, 12vw, 72px);
+        font-weight: 700;
+        color: var(--hd-accent);
+        line-height: 1;
+      }
+
+      .mail-count-label {
+        font-size: 14px;
         color: var(--hd-muted);
-        margin-top: 8px;
+        margin-top: var(--space-1);
       }
 
-      /* Package Grid */
+      .mail-preview {
+        flex: 1;
+        min-width: 200px;
+        max-width: 400px;
+      }
+
+      .mail-preview img {
+        width: 100%;
+        border-radius: var(--radius-md);
+        border: 1px solid var(--hd-border);
+      }
+
+      .mail-meta {
+        font-size: 12px;
+        color: var(--hd-muted);
+        margin-top: var(--space-3);
+      }
+
+      /* ======================== Packages ======================== */
+
+      .packages-body {
+        min-height: 80px;
+      }
+
       .package-grid {
         display: grid;
-        grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
-        gap: 16px;
+        grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+        gap: var(--space-3);
       }
 
       .package-grid.delivered {
         opacity: 0.7;
       }
 
-      /* Package Card */
       .package-card {
-        background: var(--hd-surface);
+        background: var(--hd-elevated);
         border: 1px solid var(--hd-border);
-        border-radius: 12px;
-        padding: 16px;
-        transition: all 0.15s;
+        border-radius: var(--radius-lg);
+        padding: var(--space-3);
+        transition: border-color var(--dur-fast) var(--ease), box-shadow var(--dur-fast) var(--ease);
       }
 
       .package-card:hover {
@@ -1163,80 +1388,149 @@ class HomeDeliveryPanel extends HTMLElement {
       .package-header {
         display: flex;
         align-items: center;
-        gap: 8px;
-        margin-bottom: 8px;
+        gap: var(--space-2);
+        margin-bottom: var(--space-2);
       }
 
       .carrier-badge {
-        padding: 4px 8px;
+        padding: 3px 6px;
         border-radius: 4px;
-        font-size: 11px;
+        font-size: 10px;
         font-weight: 700;
         text-transform: uppercase;
+        letter-spacing: 0.02em;
       }
 
       .package-status {
-        font-size: 14px;
+        font-size: 13px;
         font-weight: 600;
       }
 
       .package-tracking {
-        font-family: monospace;
-        font-size: 13px;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, monospace;
+        font-size: 12px;
         color: var(--hd-muted);
-        margin-bottom: 8px;
+        margin-bottom: var(--space-2);
+        word-break: break-all;
       }
 
       .package-meta {
-        font-size: 13px;
+        font-size: 12px;
         color: var(--hd-muted);
       }
 
-      .package-detail {
-        font-size: 13px;
-        margin-top: 8px;
+      .package-detail-text {
+        font-size: 12px;
+        margin-top: var(--space-2);
       }
 
       .package-latest {
-        font-size: 12px;
+        font-size: 11px;
         color: var(--hd-muted);
-        margin-top: 8px;
-        padding-top: 8px;
+        margin-top: var(--space-2);
+        padding-top: var(--space-2);
         border-top: 1px solid var(--hd-border);
       }
 
       .package-error {
-        font-size: 12px;
+        font-size: 11px;
         color: var(--hd-danger);
-        margin-top: 8px;
+        margin-top: var(--space-2);
       }
 
       .package-actions {
         display: flex;
-        gap: 8px;
-        margin-top: 12px;
-        padding-top: 12px;
+        gap: var(--space-2);
+        margin-top: var(--space-3);
+        padding-top: var(--space-3);
         border-top: 1px solid var(--hd-border);
+        flex-wrap: wrap;
       }
 
-      /* Modal */
+      .empty-state {
+        text-align: center;
+        padding: var(--space-5);
+        color: var(--hd-muted);
+      }
+
+      .empty-state p {
+        margin: var(--space-2) 0 0;
+      }
+
+      .empty-state .muted {
+        font-size: 13px;
+      }
+
+      /* ======================== Buttons ======================== */
+
+      .btn {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: var(--space-2);
+        padding: 10px 16px;
+        background: var(--hd-surface);
+        border: 1px solid var(--hd-border);
+        border-radius: var(--radius-sm);
+        color: var(--hd-text);
+        font-size: 14px;
+        font-weight: 500;
+        cursor: pointer;
+        transition: all var(--dur-fast) var(--ease);
+      }
+
+      .btn:hover {
+        background: var(--hd-hover);
+        border-color: var(--hd-border-strong);
+      }
+
+      .btn:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
+
+      .btn-primary {
+        background: var(--hd-accent);
+        border-color: var(--hd-accent);
+        color: #fff;
+      }
+
+      .btn-primary:hover {
+        background: var(--hd-accent-hover);
+        border-color: var(--hd-accent-hover);
+      }
+
+      .btn-danger {
+        color: var(--hd-danger);
+        border-color: var(--hd-danger);
+      }
+
+      .btn-danger:hover {
+        background: var(--hd-danger);
+        color: #fff;
+      }
+
+      .btn-sm {
+        padding: 6px 10px;
+        font-size: 12px;
+      }
+
+      /* ======================== Modal ======================== */
+
       .modal-backdrop {
         position: fixed;
-        top: 0;
-        left: 0;
-        right: 0;
-        bottom: 0;
+        inset: 0;
         background: rgba(0, 0, 0, 0.6);
         display: flex;
         align-items: center;
         justify-content: center;
         z-index: 1000;
-        padding: 16px;
+        padding: var(--space-4);
       }
 
       .modal {
         background: var(--hd-surface);
-        border-radius: 12px;
+        border-radius: var(--radius-lg);
         width: 100%;
         max-width: 500px;
         max-height: 90vh;
@@ -1248,7 +1542,7 @@ class HomeDeliveryPanel extends HTMLElement {
         display: flex;
         align-items: center;
         justify-content: space-between;
-        padding: 16px 20px;
+        padding: var(--space-4);
         border-bottom: 1px solid var(--hd-border);
       }
 
@@ -1257,7 +1551,7 @@ class HomeDeliveryPanel extends HTMLElement {
         margin: 0;
         display: flex;
         align-items: center;
-        gap: 8px;
+        gap: var(--space-2);
       }
 
       .close-btn {
@@ -1266,8 +1560,8 @@ class HomeDeliveryPanel extends HTMLElement {
         font-size: 24px;
         color: var(--hd-muted);
         cursor: pointer;
-        padding: 0;
         line-height: 1;
+        padding: 0;
       }
 
       .close-btn:hover {
@@ -1275,18 +1569,19 @@ class HomeDeliveryPanel extends HTMLElement {
       }
 
       .modal-body {
-        padding: 20px;
+        padding: var(--space-4);
       }
 
-      /* Timeline */
+      /* ======================== Timeline ======================== */
+
       .timeline {
-        margin-top: 12px;
+        margin-top: var(--space-3);
       }
 
       .timeline-item {
         display: flex;
-        gap: 12px;
-        padding-bottom: 16px;
+        gap: var(--space-3);
+        padding-bottom: var(--space-4);
         position: relative;
       }
 
@@ -1333,11 +1628,10 @@ class HomeDeliveryPanel extends HTMLElement {
         color: var(--hd-muted);
       }
 
-      /* Detail Row */
       .detail-row {
         display: flex;
         justify-content: space-between;
-        padding: 8px 0;
+        padding: var(--space-2) 0;
         border-bottom: 1px solid var(--hd-border);
       }
 
@@ -1345,144 +1639,240 @@ class HomeDeliveryPanel extends HTMLElement {
         color: var(--hd-muted);
       }
 
-      .detail-value.status-out-for-delivery {
-        color: var(--hd-warning);
-      }
+      .detail-value.status-out-for-delivery { color: var(--hd-warning); }
+      .detail-value.status-delivered { color: var(--hd-success); }
 
-      .detail-value.status-delivered {
-        color: var(--hd-success);
-      }
+      /* ======================== Settings View ======================== */
 
-      /* Mail View */
-      .mail-view {
-        max-width: 600px;
-      }
-
-      .info-box {
-        background: var(--hd-surface);
-        border: 1px solid var(--hd-border);
-        border-radius: 8px;
-        padding: 16px;
-        color: var(--hd-muted);
-      }
-
-      .mail-summary {
-        background: var(--hd-surface);
-        border: 1px solid var(--hd-border);
-        border-radius: 12px;
-        padding: 24px;
-        text-align: center;
-      }
-
-      .mail-count .count {
-        font-size: 48px;
-        font-weight: 700;
-        color: var(--hd-accent);
-        display: block;
-      }
-
-      .mail-count .label {
-        color: var(--hd-muted);
-      }
-
-      .mail-preview {
-        margin: 20px 0;
-      }
-
-      .mail-preview img {
-        max-width: 100%;
-        border-radius: 8px;
-        border: 1px solid var(--hd-border);
-      }
-
-      /* Settings View */
       .settings-view {
-        max-width: 700px;
+        min-height: 100vh;
+        background: var(--hd-bg);
       }
 
-      .settings-header {
+      .hd-menubar {
+        position: sticky;
+        top: 0;
+        z-index: 100;
         display: flex;
         align-items: center;
-        justify-content: space-between;
-        margin-bottom: 16px;
+        height: var(--header-height);
+        padding: 0 var(--space-4);
+        background: var(--hd-surface);
+        border-bottom: 1px solid var(--hd-border-strong);
+        gap: var(--space-3);
       }
 
-      .settings-header h2 {
-        margin: 0;
+      .hd-menubar-back {
+        display: flex;
+        align-items: center;
+        gap: var(--space-2);
+        padding: var(--space-2) var(--space-3);
+        background: transparent;
+        border: 1px solid var(--hd-border);
+        border-radius: var(--radius-sm);
+        color: var(--hd-text);
+        font-size: 14px;
+        cursor: pointer;
+        transition: all var(--dur-fast) var(--ease);
       }
 
-      .save-status {
+      .hd-menubar-back:hover {
+        background: var(--hd-hover);
+        border-color: var(--hd-border-strong);
+      }
+
+      .hd-menubar-title {
+        font-size: 16px;
+        font-weight: 600;
+        flex: 1;
+      }
+
+      .settings-save-status {
         font-size: 13px;
         color: var(--hd-muted);
-      }
-
-      .save-status.saving {
-        color: var(--hd-warning);
-      }
-
-      .save-status.saved {
-        color: var(--hd-success);
-      }
-
-      .save-status.error {
-        color: var(--hd-danger);
-      }
-
-      .settings-tabs {
         display: flex;
-        gap: 8px;
-        margin-bottom: 24px;
-        border-bottom: 1px solid var(--hd-border);
-        padding-bottom: 12px;
+        align-items: center;
+        gap: var(--space-2);
       }
 
-      .tab-btn {
+      .settings-save-status::before {
+        content: "";
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: var(--hd-muted);
+        display: none;
+      }
+
+      .settings-save-status[data-state="idle"] { display: none; }
+      .settings-save-status[data-state="saving"] { color: var(--hd-warning); }
+      .settings-save-status[data-state="saving"]::before { display: block; background: var(--hd-warning); animation: pulse 1s ease infinite; }
+      .settings-save-status[data-state="saved"] { color: var(--hd-success); }
+      .settings-save-status[data-state="saved"]::before { display: block; background: var(--hd-success); }
+      .settings-save-status[data-state="error"] { color: var(--hd-danger); }
+      .settings-save-status[data-state="error"]::before { display: block; background: var(--hd-danger); }
+
+      @keyframes pulse {
+        0%, 100% { opacity: 1; }
+        50% { opacity: 0.4; }
+      }
+
+      .settings-body {
+        padding: var(--space-4);
+        max-width: 1200px;
+        margin: 0 auto;
+      }
+
+      .settings-form {
+        display: flex;
+        flex-direction: column;
+        gap: var(--space-4);
+      }
+
+      .settings-shell {
+        display: grid;
+        grid-template-columns: 200px minmax(0, 1fr);
+        gap: var(--space-5);
+      }
+
+      @media (max-width: 900px) {
+        .settings-shell {
+          grid-template-columns: 1fr;
+        }
+
+        .settings-sidenav {
+          flex-direction: row !important;
+          overflow-x: auto;
+          padding: var(--space-2) !important;
+          gap: var(--space-2) !important;
+        }
+
+        .settings-sidenav button {
+          flex-direction: row !important;
+          white-space: nowrap;
+          padding: var(--space-2) var(--space-3) !important;
+        }
+
+        .settings-sidenav button span {
+          display: inline !important;
+        }
+      }
+
+      .settings-sidenav {
+        position: sticky;
+        top: calc(var(--header-height) + var(--space-4));
+        display: flex;
+        flex-direction: column;
+        gap: var(--space-1);
+        padding: var(--space-3);
+        background: var(--hd-surface);
+        border: 1px solid var(--hd-border);
+        border-radius: var(--radius-lg);
+        align-self: start;
+      }
+
+      .settings-sidenav button {
+        display: flex;
+        align-items: center;
+        gap: var(--space-3);
+        padding: var(--space-3);
         background: transparent;
         border: none;
+        border-radius: var(--radius-sm);
         color: var(--hd-muted);
-        padding: 8px 12px;
-        cursor: pointer;
         font-size: 14px;
-        border-radius: 6px;
+        cursor: pointer;
+        text-align: left;
+        transition: all var(--dur-fast) var(--ease);
       }
 
-      .tab-btn:hover {
-        color: var(--hd-text);
+      .settings-sidenav button:hover {
         background: var(--hd-hover);
+        color: var(--hd-text);
       }
 
-      .tab-btn.active {
-        color: var(--hd-accent);
+      .settings-sidenav button.active {
+        background: var(--hd-accent-dim);
+        color: var(--hd-accent-hover);
         font-weight: 600;
       }
 
-      .settings-section {
-        background: var(--hd-surface);
-        border: 1px solid var(--hd-border);
-        border-radius: 12px;
-        padding: 20px;
-        margin-bottom: 16px;
+      .settings-sidenav button svg {
+        width: 20px;
+        height: 20px;
+        flex-shrink: 0;
       }
 
-      .settings-section h3 {
-        margin: 0 0 16px 0;
-        font-size: 16px;
+      .settings-content {
+        min-width: 0;
       }
 
-      .settings-section h4 {
-        margin: 20px 0 12px 0;
+      .settings-pane {
+        display: none;
+        flex-direction: column;
+        gap: var(--space-4);
+      }
+
+      .settings-pane.active {
+        display: flex;
+      }
+
+      .settings-pane-head {
+        margin-bottom: var(--space-3);
+      }
+
+      .settings-pane-title {
+        font-size: 20px;
+        font-weight: 600;
+      }
+
+      .settings-pane-sub {
         font-size: 14px;
         color: var(--hd-muted);
+        margin-top: var(--space-1);
       }
 
-      /* Forms */
+      .settings-card {
+        background: var(--hd-surface);
+        border: 1px solid var(--hd-border);
+        border-radius: var(--radius-lg);
+        overflow: hidden;
+      }
+
+      .settings-card-body {
+        padding: var(--space-4);
+      }
+
+      .settings-card-body h4 {
+        font-size: 13px;
+        font-weight: 600;
+        color: var(--hd-muted);
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        margin: var(--space-4) 0 var(--space-3);
+        padding-top: var(--space-4);
+        border-top: 1px solid var(--hd-border);
+      }
+
+      .settings-card-body h4:first-child {
+        margin-top: 0;
+        padding-top: 0;
+        border-top: none;
+      }
+
+      /* ======================== Forms ======================== */
+
       .form-group {
-        margin-bottom: 16px;
+        margin-bottom: var(--space-4);
+      }
+
+      .form-group:last-child {
+        margin-bottom: 0;
       }
 
       .form-group label {
         display: block;
-        margin-bottom: 6px;
+        margin-bottom: var(--space-2);
         font-size: 14px;
         font-weight: 500;
       }
@@ -1497,7 +1887,7 @@ class HomeDeliveryPanel extends HTMLElement {
         padding: 10px 12px;
         background: var(--hd-input-bg);
         border: 1px solid var(--hd-border);
-        border-radius: 6px;
+        border-radius: var(--radius-sm);
         color: var(--hd-text);
         font-size: 14px;
       }
@@ -1511,7 +1901,7 @@ class HomeDeliveryPanel extends HTMLElement {
 
       .form-row {
         display: flex;
-        gap: 16px;
+        gap: var(--space-4);
       }
 
       .form-row .form-group {
@@ -1521,7 +1911,7 @@ class HomeDeliveryPanel extends HTMLElement {
       .hint {
         font-size: 12px;
         color: var(--hd-muted);
-        margin-top: 4px;
+        margin-top: var(--space-1);
       }
 
       .muted {
@@ -1531,7 +1921,7 @@ class HomeDeliveryPanel extends HTMLElement {
       .checkbox-label {
         display: flex;
         align-items: center;
-        gap: 8px;
+        gap: var(--space-2);
         cursor: pointer;
       }
 
@@ -1543,17 +1933,18 @@ class HomeDeliveryPanel extends HTMLElement {
 
       .form-actions {
         display: flex;
-        gap: 12px;
+        gap: var(--space-3);
         justify-content: flex-end;
-        margin-top: 20px;
-        padding-top: 16px;
+        margin-top: var(--space-4);
+        padding-top: var(--space-4);
         border-top: 1px solid var(--hd-border);
       }
 
-      /* Theme Toggle */
+      /* ======================== Theme Toggle ======================== */
+
       .theme-toggle {
         display: flex;
-        gap: 12px;
+        gap: var(--space-3);
       }
 
       .theme-btn {
@@ -1561,15 +1952,15 @@ class HomeDeliveryPanel extends HTMLElement {
         display: flex;
         align-items: center;
         justify-content: center;
-        gap: 8px;
-        padding: 12px;
+        gap: var(--space-2);
+        padding: var(--space-3);
         background: var(--hd-hover);
         border: 2px solid var(--hd-border);
-        border-radius: 8px;
+        border-radius: var(--radius-md);
         color: var(--hd-text);
         cursor: pointer;
         font-size: 14px;
-        transition: all 0.15s;
+        transition: all var(--dur-fast) var(--ease);
       }
 
       .theme-btn:hover {
@@ -1581,7 +1972,8 @@ class HomeDeliveryPanel extends HTMLElement {
         background: var(--hd-accent-dim);
       }
 
-      /* Toast */
+      /* ======================== Toast ======================== */
+
       .toast {
         position: fixed;
         bottom: 20px;
@@ -1590,11 +1982,11 @@ class HomeDeliveryPanel extends HTMLElement {
         background: var(--hd-elevated);
         color: var(--hd-text);
         padding: 12px 24px;
-        border-radius: 8px;
+        border-radius: var(--radius-md);
         box-shadow: var(--shadow-lg);
         z-index: 2000;
         opacity: 0;
-        transition: all 0.3s;
+        transition: all 0.3s var(--ease);
       }
 
       .toast.show {
@@ -1605,6 +1997,33 @@ class HomeDeliveryPanel extends HTMLElement {
       .toast.error {
         background: var(--hd-danger);
         color: #fff;
+      }
+
+      /* ======================== Loading ======================== */
+
+      .loading {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: var(--space-3);
+      }
+
+      .spinner {
+        width: 40px;
+        height: 40px;
+        border: 3px solid var(--hd-border);
+        border-top-color: var(--hd-accent);
+        border-radius: 50%;
+        animation: spin 1s linear infinite;
+      }
+
+      .error {
+        text-align: center;
+      }
+
+      .error p {
+        color: var(--hd-danger);
+        margin-bottom: var(--space-4);
       }
     `;
   }

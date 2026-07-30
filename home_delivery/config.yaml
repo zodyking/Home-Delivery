@@ -2,7 +2,7 @@
 name: Home Delivery
 version: "1.0.0"
 slug: home_delivery
-description: Package tracking and USPS Informed Delivery for Home Assistant — USPS, UPS, FedEx with TTS announcements
+description: Track USPS, UPS & FedEx packages, Informed Delivery mail, and TTS alerts — all from one panel.
 url: https://github.com/zodyking/Home-Delivery
 ingress: true
 ingress_port: 8000
@@ -15,7 +15,7 @@ arch:
   - aarch64
   - amd64
 map:
-  - addon_config:rw
+  - app_config:rw
   - homeassistant_config:rw
 options:
   log_level: info
