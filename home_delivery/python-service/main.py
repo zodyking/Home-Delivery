@@ -700,6 +700,8 @@ async def get_mail_history():
             "piece_count": entry.get("piece_count", 0),
             "letters": letters,
             "preview_images": _mail_preview_payload(entry.get("preview_images") or []),
+            "account_ids": entry.get("account_ids") or [],
+            "by_account": entry.get("by_account") or {},
         })
     return {"days": days, "count": len(days)}
 

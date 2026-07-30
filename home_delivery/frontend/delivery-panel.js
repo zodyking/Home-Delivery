@@ -37,6 +37,7 @@ class HomeDeliveryPanel extends HTMLElement {
     this._historyLoading = false;
     this._historySelectedDate = null;
     this._historyMonth = null; // Date at first of visible month
+    this._historyAccountId = null;
     this._expandedSections = new Set(["general", "media-players"]);
   }
 
@@ -981,15 +982,69 @@ class HomeDeliveryPanel extends HTMLElement {
     }
   }
 
-  async _openMailHistory() {
+  async _openMailHistory(accountId = null) {
+    this._historyAccountId = accountId || null;
     this._historySelectedDate = null;
     this._navigateTo("history");
     await this._loadMailHistory();
   }
 
+  _getHistoryAccountLabel() {
+    if (!this._historyAccountId) return "";
+    const account = this._getMailAccount(this._historyAccountId);
+    return account?.label || account?.imap_user || "Address";
+  }
+
+  _getHistoryTitle() {
+    const accountLabel = this._getHistoryAccountLabel();
+    if (this._historySelectedDate) {
+      const dayTitle = this._historyDayTitle(this._historySelectedDate);
+      return accountLabel ? `${dayTitle} · ${accountLabel}` : dayTitle;
+    }
+    return accountLabel ? `Mail History · ${accountLabel}` : "Mail History";
+  }
+
+  _sliceHistoryDayForAccount(day, accountId) {
+    if (!day || !accountId) return day;
+    const byAccount = day.by_account || {};
+    const counts = byAccount[accountId] || {};
+    const letters = (day.letters || []).filter(
+      (letter) => !letter.account_id || letter.account_id === accountId,
+    );
+    const mailpiece_count = counts.mailpiece_count != null
+      ? Number(counts.mailpiece_count) || 0
+      : letters.length;
+    const package_count = counts.package_count != null
+      ? Number(counts.package_count) || 0
+      : 0;
+
+    return {
+      ...day,
+      mailpiece_count,
+      package_count,
+      piece_count: mailpiece_count + package_count,
+      letters,
+      preview_images: letters.map((letter) => letter.image).filter(Boolean),
+    };
+  }
+
+  _getFilteredMailHistory() {
+    const days = this._mailHistory || [];
+    const accountId = this._historyAccountId;
+    if (!accountId) return days;
+
+    return days
+      .map((day) => this._sliceHistoryDayForAccount(day, accountId))
+      .filter((day) =>
+        (day.mailpiece_count || 0) > 0
+        || (day.package_count || 0) > 0
+        || (day.letters || []).length > 0,
+      );
+  }
+
   _historyDayMap() {
     const map = {};
-    for (const day of this._mailHistory || []) {
+    for (const day of this._getFilteredMailHistory()) {
       if (day?.date) map[day.date] = day;
     }
     return map;
@@ -1465,8 +1520,7 @@ class HomeDeliveryPanel extends HTMLElement {
     const settled = this._dashboardSettled ? " dashboard--settled" : "";
     return `
       <section class="dashboard${settled}">
-        ${this._renderMailHero()}
-        ${this._renderOtherMailSection()}
+        ${this._renderMailSections()}
         <div class="dashboard-bento">
           ${this._renderPackagesSection()}
         </div>
@@ -1474,63 +1528,35 @@ class HomeDeliveryPanel extends HTMLElement {
     `;
   }
 
-  _renderOtherMailSection() {
+  _renderMailSections() {
     const mail = this._mailState || {};
-    if (!mail.configured) return "";
+    if (!mail.configured) {
+      return this._renderMailAddressCard(null, { isEmpty: true });
+    }
 
-    const others = this._getOtherMailAccounts(mail.accounts || []);
-    if (others.length === 0) return "";
-
-    return `
-      <section class="mail-other-section" aria-label="Other mail addresses">
-        <div class="mail-other-head">
-          <div class="mail-other-title">Other Addresses</div>
-          <div class="mail-other-sub">${others.length} address${others.length === 1 ? "" : "es"}</div>
-        </div>
-        <div class="mail-other-grid">
-          ${others.map((account) => this._renderOtherMailCard(account)).join("")}
-        </div>
-      </section>
-    `;
-  }
-
-  _renderOtherMailCard(account) {
-    const lastCheckStr = account.last_check
-      ? new Date(account.last_check).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })
-      : "";
-    const label = account.label || account.imap_user || "Address";
-    const counts = this._getMailCounts(account);
-
-    return `
-      <article class="glass card mail-other-card ${account.last_error ? "has-error" : ""}">
-        <div class="mail-other-card-head">
-          <div>
-            <div class="mail-other-label">${this._esc(label)}</div>
-            ${lastCheckStr ? `<div class="mail-other-meta">Last checked: ${lastCheckStr}</div>` : ""}
-          </div>
-        </div>
-        <div class="mail-other-preview">
-          ${this._mailPreviewHtml(account, `${label} mail preview`)}
-        </div>
-        <div class="mail-other-body">
-          <div class="mail-other-count">${counts.mailpieces}</div>
-          <div class="mail-other-count-label">mailpieces</div>
-          <div class="mail-other-count mail-other-count--package">${counts.packages}</div>
-          <div class="mail-other-count-label">inbound packages</div>
-        </div>
-        ${account.last_error ? `<div class="mail-other-error">${this._esc(account.last_error)}</div>` : ""}
-      </article>
-    `;
-  }
-
-  _renderMailHero() {
-    const mail = this._mailState || {};
-    const configured = mail.configured;
-    const enabled = mail.enabled;
     const accounts = mail.accounts || [];
     const home = this._getHomeMailAccount(accounts);
+    const others = this._getOtherMailAccounts(accounts);
+    const cards = [];
 
-    if (!configured) {
+    if (home) {
+      cards.push(this._renderMailAddressCard(home, {
+        showDisabledWarning: mail.enabled === false,
+      }));
+    }
+    for (const account of others) {
+      cards.push(this._renderMailAddressCard(account));
+    }
+
+    if (cards.length === 0) {
+      return this._renderMailAddressCard(null, { isEmpty: true });
+    }
+
+    return `<div class="mail-address-stack">${cards.join("")}</div>`;
+  }
+
+  _renderMailAddressCard(account, options = {}) {
+    if (options.isEmpty || !account) {
       return `
         <article class="glass card mail-hero-card mail-hero-card--empty">
           <div class="mail-hero-bg" aria-hidden="true"></div>
@@ -1545,35 +1571,36 @@ class HomeDeliveryPanel extends HTMLElement {
       `;
     }
 
-    const lastCheckStr = home?.last_check
-      ? new Date(home.last_check).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })
+    const label = account.label || account.imap_user || "Address";
+    const lastCheckStr = account.last_check
+      ? new Date(account.last_check).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })
       : "";
-    const subLabel = home?.label || "Home";
-    const counts = this._getMailCounts(home);
+    const counts = this._getMailCounts(account);
+    const accountIdAttr = account.id ? ` data-account-id="${this._escapeAttr(account.id)}"` : "";
 
     return `
-      <article class="glass card mail-hero-card">
+      <article class="glass card mail-hero-card${account.last_error ? " mail-hero-card--error" : ""}">
         <div class="mail-hero-bg" aria-hidden="true"></div>
         <div class="mail-hero-inner">
           <div class="card-head mail-hero-head">
             <div>
               <div class="mail-hero-eyebrow">Informed Delivery</div>
               <div class="card-title">Mail Today</div>
-              <div class="card-sub">${this._esc(subLabel)}</div>
+              <div class="card-sub">${this._esc(label)}</div>
             </div>
-            <button type="button" class="btn-link history-btn" data-action="open-history" aria-label="Mail history">
+            <button type="button" class="btn-link history-btn" data-action="open-history"${accountIdAttr} aria-label="Mail history for ${this._escapeAttr(label)}">
               History
             </button>
           </div>
           <div class="mail-hero-stage">
             <div class="mail-hero-preview">
-              ${this._mailPreviewHtml(home, `${subLabel} mail preview`)}
+              ${this._mailPreviewHtml(account, `${label} mail preview`)}
             </div>
             ${this._renderMailCountBlocks(counts)}
           </div>
           ${lastCheckStr ? `<div class="mail-meta">Last checked: ${lastCheckStr}</div>` : ""}
-          ${home?.last_error ? `<div class="mail-meta mail-meta-warn">${this._esc(home.last_error)}</div>` : ""}
-          ${!enabled ? `<div class="mail-meta mail-meta-warn">All addresses are disabled — enable one in Settings</div>` : ""}
+          ${account.last_error ? `<div class="mail-meta mail-meta-warn">${this._esc(account.last_error)}</div>` : ""}
+          ${options.showDisabledWarning ? `<div class="mail-meta mail-meta-warn">All addresses are disabled — enable one in Settings</div>` : ""}
         </div>
       </article>
     `;
@@ -1589,7 +1616,7 @@ class HomeDeliveryPanel extends HTMLElement {
   _renderHistoryMenubar() {
     const viewingDay = !!this._historySelectedDate;
     const backLabel = "Back";
-    const title = viewingDay ? this._historyDayTitle(this._historySelectedDate) : "Mail History";
+    const title = viewingDay ? this._getHistoryTitle() : this._getHistoryTitle();
     const backAction = viewingDay ? "history-back-calendar" : "nav-back";
     const embeddedNarrow = this._isHaEmbedded() && this._isNarrow;
     if (embeddedNarrow) {
@@ -3311,7 +3338,7 @@ class HomeDeliveryPanel extends HTMLElement {
         await this._syncMail(null, { includeHistory: true });
         break;
       case "open-history":
-        await this._openMailHistory();
+        await this._openMailHistory(data.accountId || null);
         break;
       case "sync-history":
         this._historyLoading = true;
@@ -3398,6 +3425,7 @@ class HomeDeliveryPanel extends HTMLElement {
       }
       case "nav-back":
         if (this._currentView === "history") {
+          this._historyAccountId = null;
           this._navigateTo("dashboard");
         } else {
           this._navigateTo(this._settingsReturnView || "dashboard");
@@ -3834,6 +3862,17 @@ class HomeDeliveryPanel extends HTMLElement {
         gap: var(--space-2);
       }
 
+      .mail-address-stack {
+        display: flex;
+        flex-direction: column;
+        gap: var(--space-3);
+        min-width: 0;
+      }
+
+      .mail-hero-card--error {
+        border-color: color-mix(in srgb, var(--hd-danger) 55%, var(--hd-border));
+      }
+
       .history-btn {
         font-size: 12px;
         color: var(--hd-accent);
@@ -4239,123 +4278,6 @@ class HomeDeliveryPanel extends HTMLElement {
         font-size: 12px;
         color: var(--hd-muted);
         background: var(--hd-elevated);
-      }
-
-      .mail-other-card .mail-carousel {
-        max-width: none;
-        justify-self: stretch;
-      }
-
-      .mail-other-section {
-        display: flex;
-        flex-direction: column;
-        gap: var(--space-3);
-        min-width: 0;
-      }
-
-      .mail-other-head {
-        display: flex;
-        align-items: baseline;
-        justify-content: space-between;
-        gap: var(--space-2);
-        padding: 0 var(--space-1);
-      }
-
-      .mail-other-title {
-        font-size: 15px;
-        font-weight: 600;
-        color: var(--hd-text);
-      }
-
-      .mail-other-sub {
-        font-size: 12px;
-        color: var(--hd-muted);
-      }
-
-      .mail-other-grid {
-        display: grid;
-        grid-template-columns: repeat(auto-fill, minmax(min(100%, 240px), 1fr));
-        gap: var(--space-3);
-      }
-
-      .mail-other-card {
-        padding: var(--space-3);
-        display: flex;
-        flex-direction: column;
-        gap: var(--space-3);
-      }
-
-      .mail-other-card.has-error {
-        border-color: var(--hd-danger);
-      }
-
-      .mail-other-card-head {
-        display: flex;
-        align-items: flex-start;
-        justify-content: space-between;
-        gap: var(--space-2);
-      }
-
-      .mail-other-label {
-        font-size: 14px;
-        font-weight: 600;
-        color: var(--hd-text);
-      }
-
-      .mail-other-meta {
-        font-size: 11px;
-        color: var(--hd-muted);
-        margin-top: 2px;
-      }
-
-      .mail-other-preview {
-        width: 100%;
-      }
-
-      .mail-other-body {
-        display: grid;
-        grid-template-columns: repeat(2, minmax(0, 1fr));
-        gap: var(--space-2);
-        text-align: center;
-      }
-
-      .mail-other-count {
-        font-size: clamp(28px, 7vw, 36px);
-        font-weight: 700;
-        color: var(--hd-accent);
-        line-height: 1;
-        font-variant-numeric: tabular-nums;
-      }
-
-      .mail-other-count--package {
-        color: #7eb8ff;
-      }
-
-      .mail-other-count-label {
-        font-size: 12px;
-        color: var(--hd-muted);
-        margin-bottom: var(--space-1);
-      }
-
-      .mail-other-card .mail-preview,
-      .mail-other-card .mail-carousel {
-        max-width: none;
-        width: 100%;
-      }
-
-      .mail-other-card .mail-preview img {
-        height: clamp(200px, 38vw, 300px);
-        max-height: clamp(200px, 38vw, 300px);
-        object-fit: contain;
-        background: #0d0d0f;
-        border: none;
-        box-shadow: none;
-        border-radius: 0;
-      }
-
-      .mail-other-error {
-        font-size: 11px;
-        color: var(--hd-danger);
       }
 
       /* ======================== Mail Accounts Settings ======================== */
