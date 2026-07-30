@@ -46,6 +46,18 @@ async def _poll_package(package: dict[str, Any]) -> dict[str, Any] | None:
         if not result:
             return None
 
+        # Handle carrier change from re-probe
+        if result.get("carrier_changed"):
+            new_carrier = result.pop("new_carrier", None)
+            new_tracking_url = result.pop("new_tracking_url", None)
+            result.pop("carrier_changed", None)
+
+            if new_carrier:
+                logger.info(f"Updating carrier for {tracking}: {package.get('carrier')} -> {new_carrier}")
+                result["carrier"] = new_carrier
+            if new_tracking_url:
+                result["tracking_url"] = new_tracking_url
+
         # Check for changes
         old_fingerprint = package.get("last_event_fingerprint")
         new_fingerprint = result.get("last_event_fingerprint")
@@ -137,31 +149,44 @@ async def _poll_all_packages() -> None:
 
 
 async def _poll_mail() -> None:
-    """Check for new Informed Delivery mail."""
+    """Check for new Informed Delivery mail across all enabled accounts."""
     config = await config_store.load()
-    mail_config = config.get("mail", {})
+    accounts = config.get("mail", {}).get("accounts", [])
+    enabled = [a for a in accounts if a.get("enabled", True)]
 
-    if not mail_config.get("enabled"):
-        return
-
-    if not mail_config.get("imap_host"):
+    if not enabled:
         return
 
     try:
         from mail.informed_delivery import check_informed_delivery
 
-        old_count = mail_config.get("piece_count", 0)
-        result = await check_informed_delivery(mail_config)
-        new_count = result.get("piece_count", 0)
+        old_total = sum(int(a.get("piece_count") or 0) for a in enabled)
+        new_total = 0
 
-        await config_store.update_mail_state(
-            piece_count=new_count,
-            gif_filename=result.get("gif_filename"),
-        )
+        for account in enabled:
+            if not all([account.get("imap_host"), account.get("imap_user"), account.get("imap_password")]):
+                continue
+            try:
+                result = await check_informed_delivery(account)
+                piece_count = result.get("piece_count", 0)
+                new_total += piece_count
+                await config_store.update_mail_state(
+                    account_id=account["id"],
+                    piece_count=piece_count,
+                    gif_filename=result.get("gif_filename"),
+                    last_error=None,
+                )
+            except Exception as e:
+                logger.error(f"Mail check failed for {account.get('label')}: {e}")
+                await config_store.update_mail_state(
+                    account_id=account["id"],
+                    piece_count=account.get("piece_count", 0),
+                    gif_filename=account.get("gif_filename"),
+                    last_error=str(e),
+                )
 
-        # Trigger TTS if mail count increased
-        if new_count > old_count:
-            await trigger_mail_tts(new_count)
+        if new_total > old_total:
+            await trigger_mail_tts(new_total)
 
     except Exception as e:
         logger.error(f"Mail check failed: {e}")

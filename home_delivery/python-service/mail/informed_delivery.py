@@ -121,6 +121,114 @@ def _has_missing_mailpiece_placeholder(msg: Message) -> bool:
     return False
 
 
+def _normalize_folder(folder: str | None) -> str:
+    """Return a usable IMAP mailbox name."""
+    cleaned = (folder or "").strip()
+    return cleaned or "INBOX"
+
+
+def _parse_list_mailbox(line: bytes | str) -> str | None:
+    """Extract mailbox name from an IMAP LIST response line."""
+    if isinstance(line, bytes):
+        text = line.decode("utf-8", errors="replace")
+    else:
+        text = line
+
+    # Typical: (\HasNoChildren) "/" "INBOX"
+    match = re.search(r'\)\s+"[^"]*"\s+(.+)$', text)
+    if not match:
+        return None
+
+    name = match.group(1).strip()
+    if name.startswith('"') and name.endswith('"'):
+        name = name[1:-1]
+    return name.replace('\\"', '"') or None
+
+
+def _sort_folders(folders: list[str]) -> list[str]:
+    """Sort folders with INBOX first, then alphabetically."""
+    unique = sorted({f for f in folders if f}, key=str.lower)
+    if "INBOX" in unique:
+        unique.remove("INBOX")
+        unique.insert(0, "INBOX")
+    return unique
+
+
+def list_imap_folders(
+    host: str,
+    port: int,
+    user: str,
+    password: str,
+) -> list[str]:
+    """
+    Connect to IMAP and return selectable mailbox names.
+
+    Raises:
+        ValueError: On connection, auth, or LIST failures.
+    """
+    if not all([host, user, password]):
+        raise ValueError("IMAP host, user, and password are required")
+
+    imap: imaplib.IMAP4_SSL | None = None
+    try:
+        imap = imaplib.IMAP4_SSL(host, port)
+        imap.login(user, password)
+
+        status, mailboxes = imap.list()
+        if status != "OK":
+            detail = mailboxes[0].decode("utf-8", errors="replace") if mailboxes and mailboxes[0] else "list failed"
+            raise ValueError(f"Failed to list mailboxes: {detail}")
+
+        folders: list[str] = []
+        for entry in mailboxes or []:
+            if not entry:
+                continue
+            name = _parse_list_mailbox(entry)
+            if name:
+                folders.append(name)
+
+        if not folders:
+            raise ValueError("No mailboxes found on this account")
+
+        return _sort_folders(folders)
+    finally:
+        if imap is not None:
+            try:
+                imap.logout()
+            except Exception:
+                pass
+
+
+def _select_mailbox(imap: imaplib.IMAP4_SSL, folder: str) -> str:
+    """
+    Select an IMAP mailbox, falling back to INBOX when needed.
+
+    imaplib does not raise when SELECT fails; callers must verify status
+    or SEARCH will fail with 'illegal in state AUTH'.
+    """
+    candidates = [folder]
+    if folder.upper() != "INBOX":
+        candidates.append("INBOX")
+
+    last_error = "Unknown mailbox error"
+    for candidate in candidates:
+        status, data = imap.select(candidate, readonly=True)
+        if status == "OK":
+            if candidate != folder:
+                logger.warning(
+                    "IMAP folder '%s' unavailable; using '%s' instead",
+                    folder,
+                    candidate,
+                )
+            return candidate
+
+        detail = data[0].decode("utf-8", errors="replace") if data and data[0] else "select failed"
+        last_error = detail
+        logger.warning("Failed to select IMAP folder '%s': %s", candidate, detail)
+
+    raise ValueError(f"Failed to select mailbox '{folder}': {last_error}")
+
+
 async def check_informed_delivery(mail_config: dict[str, Any]) -> dict[str, Any]:
     """
     Check IMAP for today's Informed Delivery email.
@@ -135,26 +243,31 @@ async def check_informed_delivery(mail_config: dict[str, Any]) -> dict[str, Any]
     port = mail_config.get("imap_port", 993)
     user = mail_config.get("imap_user", "")
     password = mail_config.get("imap_password", "")
-    folder = mail_config.get("folder", "INBOX")
+    folder = _normalize_folder(mail_config.get("folder"))
 
     if not all([host, user, password]):
         raise ValueError("IMAP credentials not configured")
 
-    logger.info(f"Checking Informed Delivery via IMAP: {host}")
+    logger.info(f"Checking Informed Delivery via IMAP: {host} (folder: {folder})")
 
-    # Connect to IMAP
+    imap: imaplib.IMAP4_SSL | None = None
     try:
         imap = imaplib.IMAP4_SSL(host, port)
         imap.login(user, password)
-        imap.select(folder)
+        selected_folder = _select_mailbox(imap, folder)
     except Exception as e:
         logger.error(f"IMAP connection failed: {e}")
+        if imap is not None:
+            try:
+                imap.logout()
+            except Exception:
+                pass
         raise
 
     try:
         # Search for today's Informed Delivery email
         search_query = _build_search_query(USPS_SENDERS, DIGEST_SUBJECT, _get_today_imap_date())
-        logger.debug(f"IMAP search: {search_query}")
+        logger.debug(f"IMAP search in {selected_folder}: {search_query}")
 
         # Try UTF-8 charset first
         try:
@@ -162,7 +275,11 @@ async def check_informed_delivery(mail_config: dict[str, Any]) -> dict[str, Any]
         except Exception:
             status, data = imap.search(None, search_query)
 
-        if status != "OK" or not data[0]:
+        if status != "OK":
+            detail = data[0].decode("utf-8", errors="replace") if data and data[0] else "search failed"
+            raise ValueError(f"IMAP search failed: {detail}")
+
+        if not data or not data[0]:
             logger.info("No Informed Delivery email found for today")
             return {"piece_count": 0, "gif_filename": None}
 
@@ -197,11 +314,15 @@ async def check_informed_delivery(mail_config: dict[str, Any]) -> dict[str, Any]
         return {"piece_count": piece_count, "gif_filename": gif_filename}
 
     finally:
-        try:
-            imap.close()
-            imap.logout()
-        except Exception:
-            pass
+        if imap is not None:
+            try:
+                imap.close()
+            except Exception:
+                pass
+            try:
+                imap.logout()
+            except Exception:
+                pass
 
 
 async def _generate_mail_gif(images: list[bytes]) -> str | None:

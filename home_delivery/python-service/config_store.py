@@ -17,7 +17,7 @@ from data_config import DATA_DIR
 logger = logging.getLogger(__name__)
 
 CONFIG_FILE = DATA_DIR / "home_delivery_config.json"
-STORAGE_VERSION = 1
+STORAGE_VERSION = 2
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "_version": STORAGE_VERSION,
@@ -26,15 +26,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "overrides": {},
     },
     "mail": {
-        "enabled": False,
-        "imap_host": "",
-        "imap_port": 993,
-        "imap_user": "",
-        "imap_password": "",
-        "folder": "INBOX",
-        "last_check": None,
-        "piece_count": 0,
-        "gif_filename": None,
+        "accounts": [],
     },
     "media_players": [],
     "announcement_players": {},
@@ -70,12 +62,79 @@ def _deep_merge(base: dict, updates: dict) -> dict:
     return result
 
 
+def _migrate_mail_config(mail: dict[str, Any]) -> dict[str, Any]:
+    """Migrate legacy flat mail config to accounts list."""
+    if not isinstance(mail, dict):
+        return {"accounts": []}
+
+    if mail.get("accounts"):
+        return mail
+
+    host = mail.get("imap_host", "")
+    user = mail.get("imap_user", "")
+    if not host and not user:
+        return {"accounts": []}
+
+    import uuid as _uuid
+
+    account = {
+        "id": str(_uuid.uuid4()),
+        "label": mail.get("label") or "Home",
+        "enabled": mail.get("enabled", True),
+        "imap_host": host,
+        "imap_port": mail.get("imap_port", 993),
+        "imap_user": user,
+        "imap_password": mail.get("imap_password", ""),
+        "folder": mail.get("folder", "INBOX"),
+        "last_check": mail.get("last_check"),
+        "piece_count": mail.get("piece_count", 0),
+        "gif_filename": mail.get("gif_filename"),
+        "last_error": None,
+    }
+    return {"accounts": [account]}
+
+
+def _aggregate_mail_state(accounts: list[dict[str, Any]]) -> dict[str, Any]:
+    """Aggregate mail state across all enabled accounts."""
+    enabled_accounts = [a for a in accounts if a.get("enabled", True)]
+    active = enabled_accounts if enabled_accounts else accounts
+
+    piece_count = sum(int(a.get("piece_count") or 0) for a in active)
+    last_checks = [a.get("last_check") for a in active if a.get("last_check")]
+    last_check = max(last_checks) if last_checks else None
+
+    gif_filename = None
+    for account in active:
+        if account.get("gif_filename"):
+            gif_filename = account["gif_filename"]
+            break
+
+    configured = any(
+        a.get("imap_host") and a.get("imap_user") and a.get("imap_password")
+        for a in accounts
+    )
+    enabled = any(a.get("enabled", True) for a in accounts if a.get("imap_host"))
+
+    return {
+        "configured": configured,
+        "enabled": enabled,
+        "piece_count": piece_count,
+        "last_check": last_check,
+        "gif_filename": gif_filename,
+        "accounts": accounts,
+    }
+
+
 def _migrate_config(config: dict) -> dict:
     """Migrate config from older versions if needed."""
     version = config.get("_version", 0)
     if version < STORAGE_VERSION:
         config = _deep_merge(DEFAULT_CONFIG, config)
+        if "mail" in config:
+            config["mail"] = _migrate_mail_config(config.get("mail", {}))
         config["_version"] = STORAGE_VERSION
+    elif "mail" in config and not config["mail"].get("accounts"):
+        config["mail"] = _migrate_mail_config(config.get("mail", {}))
     return config
 
 
@@ -128,6 +187,10 @@ class ConfigStore:
             if self._config is None:
                 await self.load()
             self._config = _deep_merge(self._config, updates)
+            if "mail" in self._config:
+                self._config["mail"] = _migrate_mail_config(self._config["mail"])
+                if self._config["mail"].get("accounts") is not None:
+                    self._config["mail"] = {"accounts": self._config["mail"]["accounts"]}
             await self._save_locked()
             return copy.deepcopy(self._config)
 
@@ -193,37 +256,47 @@ class ConfigStore:
             return False
 
     async def get_mail_state(self) -> dict[str, Any]:
-        """Get mail tracking state."""
+        """Get aggregated mail tracking state."""
         config = await self.load()
         mail = config.get("mail", {})
-        return {
-            "enabled": mail.get("enabled", False),
-            "last_check": mail.get("last_check"),
-            "piece_count": mail.get("piece_count", 0),
-            "gif_filename": mail.get("gif_filename"),
-        }
+        accounts = mail.get("accounts", [])
+        return _aggregate_mail_state(accounts)
+
+    async def get_mail_accounts(self) -> list[dict[str, Any]]:
+        """Get all mail accounts."""
+        config = await self.load()
+        return copy.deepcopy(config.get("mail", {}).get("accounts", []))
+
+    async def update_mail_account(self, account_id: str, updates: dict[str, Any]) -> dict[str, Any] | None:
+        """Update a mail account by ID."""
+        async with self._lock:
+            if self._config is None:
+                await self.load()
+
+            accounts = self._config.get("mail", {}).get("accounts", [])
+            for i, account in enumerate(accounts):
+                if account.get("id") == account_id:
+                    accounts[i] = _deep_merge(account, updates)
+                    self._config["mail"]["accounts"] = accounts
+                    await self._save_locked()
+                    return copy.deepcopy(accounts[i])
+            return None
 
     async def update_mail_state(
         self,
+        account_id: str,
         piece_count: int,
         gif_filename: str | None = None,
+        last_error: str | None = None,
     ) -> None:
-        """Update mail state after IMAP check."""
-        async with self._lock:
-            if self._config is None:
-                if CONFIG_FILE.exists():
-                    raw = CONFIG_FILE.read_text(encoding="utf-8")
-                    self._config = _migrate_config(json.loads(raw))
-                else:
-                    self._config = copy.deepcopy(DEFAULT_CONFIG)
-
-            if "mail" not in self._config:
-                self._config["mail"] = {}
-
-            self._config["mail"]["piece_count"] = piece_count
-            self._config["mail"]["gif_filename"] = gif_filename
-            self._config["mail"]["last_check"] = datetime.now(timezone.utc).isoformat()
-            await self._save_locked()
+        """Update mail state for a specific account after IMAP check."""
+        updates: dict[str, Any] = {
+            "piece_count": piece_count,
+            "gif_filename": gif_filename,
+            "last_check": datetime.now(timezone.utc).isoformat(),
+            "last_error": last_error,
+        }
+        await self.update_mail_account(account_id, updates)
 
 
 # Global singleton

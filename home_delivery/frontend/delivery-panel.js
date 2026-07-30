@@ -22,10 +22,12 @@ class HomeDeliveryPanel extends HTMLElement {
     this._saveStatus = "idle";
     this._saveStatusText = "";
     this._narrow = null;
-    this._addPackageModal = false;
+    this._addPackageWizard = null;
     this._selectedPackage = null;
     this._refreshingPackage = null;
     this._refreshingAll = false;
+    this._mailAccountModal = null;
+    this._mailSyncing = false;
   }
 
   get _isNarrow() {
@@ -105,6 +107,7 @@ class HomeDeliveryPanel extends HTMLElement {
 
       this._config = configResp.config || {};
       this._settings = JSON.parse(JSON.stringify(this._config));
+      this._normalizeMailSettings(this._settings);
       this._packages = packagesResp.packages || [];
       this._mailState = mailResp;
       this._mediaPlayers = entitiesResp.media_players || [];
@@ -174,7 +177,7 @@ class HomeDeliveryPanel extends HTMLElement {
     this._render();
     try {
       const [mailResp] = await Promise.all([
-        this._fetchApi("/api/mail/refresh", { method: "POST" }).then(() => this._fetchApi("/api/mail")).catch(() => this._mailState),
+        this._fetchApi("/api/mail/sync", { method: "POST", body: "{}" }).then(() => this._fetchApi("/api/mail")).catch(() => this._mailState),
         ...this._packages.filter(p => !p.delivered).map(p =>
           this._fetchApi(`/api/packages/${p.id}/refresh`, { method: "POST" })
             .then(resp => { if (resp.package) { const idx = this._packages.findIndex(x => x.id === p.id); if (idx >= 0) this._packages[idx] = resp.package; } })
@@ -424,20 +427,10 @@ class HomeDeliveryPanel extends HTMLElement {
 
     const mailEnabled = s.querySelector("#mail-enabled");
     const imapHost = s.querySelector("#imap-host");
-    const imapPort = s.querySelector("#imap-port");
-    const imapUser = s.querySelector("#imap-user");
-    const imapPassword = s.querySelector("#imap-password");
-    const imapFolder = s.querySelector("#imap-folder");
 
-    if (!this._settings.mail) this._settings.mail = {};
-    if (mailEnabled) this._settings.mail.enabled = mailEnabled.checked;
-    if (imapHost) this._settings.mail.imap_host = imapHost.value;
-    if (imapPort) this._settings.mail.imap_port = parseInt(imapPort.value) || 993;
-    if (imapUser) this._settings.mail.imap_user = imapUser.value;
-    if (imapPassword && imapPassword.value !== "********") {
-      this._settings.mail.imap_password = imapPassword.value;
+    if (mailEnabled || imapHost) {
+      // Legacy mail form — accounts are managed directly in _settings.mail.accounts
     }
-    if (imapFolder) this._settings.mail.folder = imapFolder.value;
 
     const ttsEnabled = s.querySelector("#tts-enabled");
     const ttsStatusChange = s.querySelector("#tts-status-change");
@@ -489,6 +482,375 @@ class HomeDeliveryPanel extends HTMLElement {
     return String(s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
   }
 
+  _generateId() {
+    return (typeof crypto !== "undefined" && crypto.randomUUID)
+      ? crypto.randomUUID()
+      : `id-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  }
+
+  _normalizeMailSettings(settings) {
+    if (!settings.mail) settings.mail = { accounts: [] };
+    if (Array.isArray(settings.mail.accounts)) return;
+
+    const legacy = settings.mail;
+    if (legacy.imap_host || legacy.imap_user) {
+      settings.mail = {
+        accounts: [{
+          id: this._generateId(),
+          label: legacy.label || "Home",
+          enabled: legacy.enabled !== false,
+          imap_host: legacy.imap_host || "",
+          imap_port: legacy.imap_port || 993,
+          imap_user: legacy.imap_user || "",
+          imap_password: legacy.imap_password || "",
+          folder: legacy.folder || "INBOX",
+          piece_count: legacy.piece_count || 0,
+          last_check: legacy.last_check || null,
+          gif_filename: legacy.gif_filename || null,
+          last_error: null,
+        }],
+      };
+    } else {
+      settings.mail = { accounts: [] };
+    }
+  }
+
+  _getMailAccounts() {
+    this._normalizeMailSettings(this._settings);
+    return this._settings.mail?.accounts || [];
+  }
+
+  _getMailAccount(id) {
+    return this._getMailAccounts().find(a => a.id === id) || null;
+  }
+
+  async _persistMailAccounts() {
+    if (!this._settings.mail) this._settings.mail = { accounts: [] };
+    await this._saveSettings({ silent: true });
+  }
+
+  async _syncMail(accountId = null) {
+    this._mailSyncing = true;
+    this._render();
+    try {
+      await this._saveSettings({ silent: true });
+      const body = accountId ? { account_id: accountId } : {};
+      const resp = await this._fetchApi("/api/mail/sync", {
+        method: "POST",
+        body: JSON.stringify(body),
+      });
+      const mailResp = await this._fetchApi("/api/mail");
+      this._mailState = mailResp;
+      const configResp = await this._fetchApi("/api/config");
+      this._config = configResp.config || {};
+      this._settings = JSON.parse(JSON.stringify(this._config));
+      this._normalizeMailSettings(this._settings);
+
+      const failed = (resp.results || []).filter(r => !r.success);
+      if (failed.length > 0) {
+        this._showToast(failed[0].error || "Sync failed", { error: true });
+      } else {
+        this._showToast(`Synced — ${resp.piece_count || 0} pieces today`);
+      }
+    } catch (err) {
+      this._showToast(err.message, { error: true });
+    } finally {
+      this._mailSyncing = false;
+      this._render();
+    }
+  }
+
+  // ============================================================================
+  // Add Package Wizard Helpers
+  // ============================================================================
+
+  async _handleWizardNext() {
+    const wiz = this._addPackageWizard;
+    if (!wiz) return;
+
+    const s = this.shadowRoot;
+
+    if (wiz.step === 1) {
+      const trackingInput = s.querySelector("#wizard-tracking");
+      const tracking = trackingInput?.value?.trim();
+
+      if (!tracking) {
+        this._showToast("Please enter a tracking number", { error: true });
+        return;
+      }
+
+      wiz.tracking = tracking;
+
+      // If we already have a carrier, move to next step
+      if (wiz.carrier) {
+        wiz.step = 2;
+        this._render();
+        return;
+      }
+
+      // Probe for carrier
+      wiz.probing = true;
+      wiz.probeError = null;
+      this._render();
+
+      try {
+        const resp = await this._fetchApi("/api/packages/probe-carrier", {
+          method: "POST",
+          body: JSON.stringify({ tracking_number: tracking }),
+        });
+
+        wiz.carrier = resp.carrier;
+        wiz.probing = false;
+        wiz.step = 2;
+        this._render();
+      } catch (err) {
+        wiz.probing = false;
+        wiz.probeError = err.message || "Could not detect carrier";
+        this._render();
+      }
+    } else if (wiz.step === 2) {
+      const recipientInput = s.querySelector("#wizard-recipient");
+      wiz.recipient = recipientInput?.value?.trim() || "";
+      wiz.step = 3;
+      this._render();
+    }
+  }
+
+  _handleWizardBack() {
+    const wiz = this._addPackageWizard;
+    if (!wiz || wiz.step <= 1) return;
+
+    const s = this.shadowRoot;
+
+    // Capture current step's input before going back
+    if (wiz.step === 2) {
+      const recipientInput = s.querySelector("#wizard-recipient");
+      wiz.recipient = recipientInput?.value?.trim() || "";
+    } else if (wiz.step === 3) {
+      const otherInput = s.querySelector("#wizard-destination-other");
+      if (otherInput) {
+        wiz.destinationOther = otherInput.value?.trim() || "";
+      }
+    }
+
+    wiz.step--;
+    this._render();
+  }
+
+  async _handleWizardSubmit() {
+    const wiz = this._addPackageWizard;
+    if (!wiz) return;
+
+    const s = this.shadowRoot;
+
+    // Get destination
+    let destination = "";
+    let destinationAccountId = null;
+
+    const accounts = this._getMailAccounts();
+    const hasAccounts = accounts.length > 0;
+
+    if (hasAccounts && wiz.destinationMode === "account" && wiz.destinationAccountId) {
+      const account = this._getMailAccount(wiz.destinationAccountId);
+      destination = account?.label || "";
+      destinationAccountId = wiz.destinationAccountId;
+    } else {
+      const otherInput = s.querySelector("#wizard-destination-other");
+      destination = otherInput?.value?.trim() || wiz.destinationOther || "";
+    }
+
+    if (!wiz.tracking || !wiz.carrier) {
+      this._showToast("Missing tracking number or carrier", { error: true });
+      return;
+    }
+
+    wiz.submitting = true;
+    this._render();
+
+    try {
+      await this._addPackage({
+        tracking_number: wiz.tracking,
+        carrier: wiz.carrier,
+        recipient: wiz.recipient || "",
+        destination: destination,
+        destination_account_id: destinationAccountId,
+      });
+
+      this._addPackageWizard = null;
+      this._render();
+      this._showToast("Package added");
+    } catch (err) {
+      wiz.submitting = false;
+      this._render();
+      this._showToast(err.message, { error: true });
+    }
+  }
+
+  // ============================================================================
+  // Mail Account Wizard Helpers
+  // ============================================================================
+
+  _syncMailWizardFromForm(step) {
+    const s = this.shadowRoot;
+    const modal = this._mailAccountModal;
+    if (!s || !modal) return;
+
+    if (step === 1) {
+      modal.imapHost = s.querySelector("#mail-imap-host")?.value?.trim() || modal.imapHost;
+      modal.imapPort = parseInt(s.querySelector("#mail-imap-port")?.value) || modal.imapPort || 993;
+      modal.imapUser = s.querySelector("#mail-imap-user")?.value?.trim() || modal.imapUser;
+      const password = s.querySelector("#mail-imap-password")?.value;
+      if (password !== undefined && password !== null) {
+        modal.imapPassword = password;
+      }
+    } else if (step === 2) {
+      modal.folder = s.querySelector("#mail-imap-folder")?.value?.trim() || modal.folder || "INBOX";
+    } else if (step === 3) {
+      modal.label = s.querySelector("#mail-label")?.value?.trim() || modal.label;
+    }
+  }
+
+  async _handleMailWizardNext() {
+    const modal = this._mailAccountModal;
+    if (!modal) return;
+
+    if (modal.step === 1) {
+      this._syncMailWizardFromForm(1);
+
+      if (!modal.imapHost || !modal.imapUser) {
+        this._showToast("IMAP server and email are required", { error: true });
+        return;
+      }
+
+      const isEdit = modal.mode === "edit";
+      const hasPassword = modal.imapPassword && modal.imapPassword !== "********";
+      if (!isEdit && !hasPassword) {
+        this._showToast("Password is required", { error: true });
+        return;
+      }
+      if (isEdit && !hasPassword && !modal.id) {
+        this._showToast("Password is required", { error: true });
+        return;
+      }
+
+      modal.testing = true;
+      modal.testError = null;
+      this._render();
+
+      try {
+        const body = {
+          imap_host: modal.imapHost,
+          imap_port: modal.imapPort || 993,
+          imap_user: modal.imapUser,
+          imap_password: modal.imapPassword || null,
+        };
+        if (modal.mode === "edit" && modal.id) {
+          body.account_id = modal.id;
+        }
+
+        const resp = await this._fetchApi("/api/mail/test-imap", {
+          method: "POST",
+          body: JSON.stringify(body),
+        });
+
+        modal.folders = resp.folders || [];
+        const preferred = modal.folder && modal.folders.includes(modal.folder)
+          ? modal.folder
+          : resp.default_folder;
+        modal.folder = preferred || "INBOX";
+        modal.testing = false;
+        modal.step = 2;
+        this._render();
+      } catch (err) {
+        modal.testing = false;
+        modal.testError = err.message || "Could not connect to IMAP";
+        this._render();
+      }
+    } else if (modal.step === 2) {
+      this._syncMailWizardFromForm(2);
+      modal.step = 3;
+      this._render();
+    }
+  }
+
+  _handleMailWizardBack() {
+    const modal = this._mailAccountModal;
+    if (!modal || modal.step <= 1) return;
+
+    this._syncMailWizardFromForm(modal.step);
+    modal.step--;
+    modal.testError = null;
+    this._render();
+  }
+
+  async _handleMailWizardSubmit() {
+    const modal = this._mailAccountModal;
+    if (!modal) return;
+
+    this._syncMailWizardFromForm(3);
+
+    if (!modal.label) {
+      this._showToast("Please enter who this mail is for", { error: true });
+      return;
+    }
+
+    modal.submitting = true;
+    this._render();
+
+    const accounts = this._getMailAccounts();
+    const isEdit = modal.mode === "edit";
+
+    try {
+      if (isEdit) {
+        const idx = accounts.findIndex(a => a.id === modal.id);
+        if (idx >= 0) {
+          const updated = {
+            ...accounts[idx],
+            label: modal.label,
+            imap_host: modal.imapHost,
+            imap_port: modal.imapPort || 993,
+            folder: modal.folder || "INBOX",
+            imap_user: modal.imapUser,
+          };
+          if (modal.imapPassword && modal.imapPassword !== "********") {
+            updated.imap_password = modal.imapPassword;
+          }
+          accounts[idx] = updated;
+        }
+      } else {
+        if (!modal.imapPassword || modal.imapPassword === "********") {
+          throw new Error("Password is required");
+        }
+        accounts.push({
+          id: this._generateId(),
+          label: modal.label,
+          enabled: true,
+          imap_host: modal.imapHost,
+          imap_port: modal.imapPort || 993,
+          imap_user: modal.imapUser,
+          imap_password: modal.imapPassword,
+          folder: modal.folder || "INBOX",
+          piece_count: 0,
+          last_check: null,
+          gif_filename: null,
+          last_error: null,
+        });
+      }
+
+      this._settings.mail = { accounts };
+      await this._persistMailAccounts();
+      this._mailAccountModal = null;
+      const mailResp = await this._fetchApi("/api/mail");
+      this._mailState = mailResp;
+      this._render();
+      this._showToast(isEdit ? "Address updated" : "Address added");
+    } catch (err) {
+      modal.submitting = false;
+      this._render();
+      this._showToast(err.message, { error: true });
+    }
+  }
+
   // ============================================================================
   // Render
   // ============================================================================
@@ -507,7 +869,8 @@ class HomeDeliveryPanel extends HTMLElement {
             ${this._renderSettingsContent()}
           </div>
         </div>
-        ${this._addPackageModal ? this._renderAddPackageModal() : ""}
+        ${this._mailAccountModal ? this._renderMailAccountModal() : ""}
+        ${this._addPackageWizard ? this._renderAddPackageWizard() : ""}
       `;
       this._bindEvents();
       this._attachSettingsHandlers();
@@ -541,7 +904,7 @@ class HomeDeliveryPanel extends HTMLElement {
           </div>
         </div>
       </div>
-      ${this._addPackageModal ? this._renderAddPackageModal() : ""}
+      ${this._addPackageWizard ? this._renderAddPackageWizard() : ""}
       ${this._selectedPackage ? this._renderPackageDetail() : ""}
     `;
 
@@ -588,39 +951,32 @@ class HomeDeliveryPanel extends HTMLElement {
     const mail = this._mailState || {};
     const configured = mail.configured;
     const enabled = mail.enabled;
+    const accounts = mail.accounts || [];
 
     if (!configured) {
       return `
         <article class="glass card mail-hero-card">
           <div class="mail-hero-message">
             <svg viewBox="0 0 24 24" width="48" height="48" fill="currentColor" style="opacity:0.3"><path d="M20 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 4l-8 5-8-5V6l8 5 8-5v2z"/></svg>
-            <p>Mail tracking is not configured</p>
-            <button class="btn btn-primary" data-action="configure-mail">Configure IMAP</button>
-          </div>
-        </article>
-      `;
-    }
-
-    if (!enabled) {
-      return `
-        <article class="glass card mail-hero-card">
-          <div class="mail-hero-message">
-            <svg viewBox="0 0 24 24" width="48" height="48" fill="currentColor" style="opacity:0.3"><path d="M20 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 4l-8 5-8-5V6l8 5 8-5v2z"/></svg>
-            <p>Mail tracking is disabled</p>
-            <button class="btn btn-primary" data-action="configure-mail">Enable in Settings</button>
+            <p>No mail addresses configured</p>
+            <button class="btn btn-primary" data-action="configure-mail">Add Mail Address</button>
           </div>
         </article>
       `;
     }
 
     const lastCheckStr = mail.last_check ? new Date(mail.last_check).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : "";
+    const accountLabels = accounts.filter(a => a.enabled !== false).map(a => a.label).filter(Boolean);
+    const subLabel = accountLabels.length > 1
+      ? `${accountLabels.join(", ")}`
+      : accountLabels[0] || "USPS Informed Delivery";
 
     return `
       <article class="glass card mail-hero-card">
         <div class="card-head">
           <div>
             <div class="card-title">Mail Today</div>
-            <div class="card-sub">USPS Informed Delivery</div>
+            <div class="card-sub">${this._esc(subLabel)}</div>
           </div>
           <button class="btn btn-sm" data-action="refresh-mail">Check Now</button>
         </div>
@@ -636,6 +992,7 @@ class HomeDeliveryPanel extends HTMLElement {
           ` : ""}
         </div>
         ${lastCheckStr ? `<div class="mail-meta">Last checked: ${lastCheckStr}</div>` : ""}
+        ${!enabled ? `<div class="mail-meta mail-meta-warn">All addresses are disabled — enable one in Settings</div>` : ""}
       </article>
     `;
   }
@@ -783,7 +1140,6 @@ class HomeDeliveryPanel extends HTMLElement {
   }
 
   _renderSettingsContent() {
-    const mail = this._settings.mail || {};
     const tts = this._settings.tts || {};
     const polling = this._settings.polling || {};
     const { mode } = this._getAppearance();
@@ -824,42 +1180,7 @@ class HomeDeliveryPanel extends HTMLElement {
               </div>
             </section>
 
-            <section class="settings-pane ${activePane === "mail" ? "active" : ""}" data-settings-pane="mail">
-              <div class="settings-pane-head">
-                <div class="settings-pane-title">Mail</div>
-                <div class="settings-pane-sub">USPS Informed Delivery via IMAP</div>
-              </div>
-              <div class="settings-card">
-                <div class="settings-card-body">
-                  <div class="form-group">
-                    <label class="checkbox-label">
-                      <input type="checkbox" id="mail-enabled" ${mail.enabled ? "checked" : ""} />
-                      Enable Mail Tracking
-                    </label>
-                  </div>
-                  <div class="form-group">
-                    <label for="imap-host">IMAP Server</label>
-                    <input type="text" id="imap-host" value="${this._esc(mail.imap_host || "")}" placeholder="imap.gmail.com" />
-                  </div>
-                  <div class="form-group">
-                    <label for="imap-port">IMAP Port</label>
-                    <input type="number" id="imap-port" value="${mail.imap_port || 993}" />
-                  </div>
-                  <div class="form-group">
-                    <label for="imap-user">Email Address</label>
-                    <input type="email" id="imap-user" value="${this._esc(mail.imap_user || "")}" placeholder="you@example.com" />
-                  </div>
-                  <div class="form-group">
-                    <label for="imap-password">Password / App Password</label>
-                    <input type="password" id="imap-password" value="${mail.imap_password ? "********" : ""}" placeholder="App password for Gmail" />
-                  </div>
-                  <div class="form-group">
-                    <label for="imap-folder">Folder</label>
-                    <input type="text" id="imap-folder" value="${this._esc(mail.folder || "INBOX")}" />
-                  </div>
-                </div>
-              </div>
-            </section>
+            ${this._renderMailSettingsPane(activePane)}
 
             <section class="settings-pane ${activePane === "announcements" ? "active" : ""}" data-settings-pane="announcements">
               <div class="settings-pane-head">
@@ -942,34 +1263,420 @@ class HomeDeliveryPanel extends HTMLElement {
     `;
   }
 
-  _renderAddPackageModal() {
+  _renderMailSettingsPane(activePane) {
+    const accounts = this._getMailAccounts();
+
     return `
-      <div class="modal-backdrop" data-action="close-add">
-        <div class="modal" onclick="event.stopPropagation()">
+      <section class="settings-pane ${activePane === "mail" ? "active" : ""}" data-settings-pane="mail">
+        <div class="settings-pane-head">
+          <div class="settings-pane-title">Mail</div>
+          <div class="settings-pane-sub">USPS Informed Delivery via IMAP</div>
+        </div>
+        <div class="settings-card mail-accounts-card">
+          <div class="settings-card-body">
+            ${accounts.length === 0 ? `
+              <div class="mail-accounts-empty">
+                <svg viewBox="0 0 24 24" width="40" height="40" fill="currentColor" style="opacity:0.3"><path d="M20 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 4l-8 5-8-5V6l8 5 8-5v2z"/></svg>
+                <p>No mail addresses yet</p>
+                <p class="hint">Add an address to track USPS Informed Delivery</p>
+              </div>
+            ` : `
+              <div class="mail-accounts-list">
+                ${accounts.map(a => this._renderMailAccountCard(a)).join("")}
+              </div>
+            `}
+            <button type="button" class="btn mail-add-btn" data-action="add-mail-account">
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/></svg>
+              Add Address
+            </button>
+          </div>
+          <div class="mail-sync-footer">
+            <button type="button" class="btn btn-primary btn-full" data-action="sync-mail" ${this._mailSyncing ? "disabled" : ""}>
+              ${this._mailSyncing ? "Syncing..." : "Sync"}
+            </button>
+            <p class="hint">Fetch inbox now and verify IMAP credentials</p>
+          </div>
+        </div>
+      </section>
+    `;
+  }
+
+  _renderMailAccountCard(account) {
+    const lastCheck = account.last_check
+      ? new Date(account.last_check).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })
+      : "Never synced";
+    const statusClass = account.last_error ? "error" : account.enabled !== false ? "active" : "disabled";
+
+    return `
+      <div class="mail-account-card ${statusClass}" data-account-id="${account.id}">
+        <div class="mail-account-main">
+          <div class="mail-account-label">${this._esc(account.label || "Address")}</div>
+          <div class="mail-account-email">${this._esc(account.imap_user || "")}</div>
+          <div class="mail-account-meta">
+            <span>${account.piece_count || 0} pieces today</span>
+            <span class="mail-account-dot">·</span>
+            <span>${this._esc(account.folder || "INBOX")}</span>
+          </div>
+          <div class="mail-account-meta muted">${lastCheck}</div>
+          ${account.last_error ? `<div class="mail-account-error">${this._esc(account.last_error)}</div>` : ""}
+        </div>
+        <div class="mail-account-actions">
+          <label class="toggle-switch" title="${account.enabled !== false ? "Disable" : "Enable"}">
+            <input type="checkbox" data-action="toggle-mail-account" data-id="${account.id}" ${account.enabled !== false ? "checked" : ""} />
+            <span class="toggle-slider"></span>
+          </label>
+          <button type="button" class="btn btn-sm" data-action="edit-mail-account" data-id="${account.id}">Edit</button>
+          <button type="button" class="btn btn-sm btn-danger" data-action="delete-mail-account" data-id="${account.id}">Remove</button>
+        </div>
+      </div>
+    `;
+  }
+
+  _renderMailAccountModal() {
+    const modal = this._mailAccountModal || {};
+    const isEdit = modal.mode === "edit";
+    const step = modal.step || 1;
+
+    return `
+      <div class="modal-backdrop" data-action="close-mail-account">
+        <div class="modal wizard-modal" onclick="event.stopPropagation()">
+          <div class="modal-header">
+            <h2>${isEdit ? "Edit Mail Address" : "Add Mail Address"}</h2>
+            <button class="close-btn" data-action="close-mail-account">&times;</button>
+          </div>
+          <div class="wizard-progress">
+            <div class="wizard-step-indicator ${step >= 1 ? "active" : ""} ${step > 1 ? "completed" : ""}">
+              <span class="wizard-step-num">1</span>
+              <span class="wizard-step-label">IMAP</span>
+            </div>
+            <div class="wizard-step-connector ${step > 1 ? "completed" : ""}"></div>
+            <div class="wizard-step-indicator ${step >= 2 ? "active" : ""} ${step > 2 ? "completed" : ""}">
+              <span class="wizard-step-num">2</span>
+              <span class="wizard-step-label">Folder</span>
+            </div>
+            <div class="wizard-step-connector ${step > 2 ? "completed" : ""}"></div>
+            <div class="wizard-step-indicator ${step >= 3 ? "active" : ""}">
+              <span class="wizard-step-num">3</span>
+              <span class="wizard-step-label">Details</span>
+            </div>
+          </div>
+          <div class="modal-body wizard-body">
+            ${step === 1 ? this._renderMailWizardStep1(modal) : ""}
+            ${step === 2 ? this._renderMailWizardStep2(modal) : ""}
+            ${step === 3 ? this._renderMailWizardStep3(modal) : ""}
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  _renderMailWizardStep1(modal) {
+    const isEdit = modal.mode === "edit";
+    const testing = modal.testing;
+
+    return `
+      <div class="wizard-step-content">
+        <div class="form-group">
+          <label for="mail-imap-host">IMAP Server</label>
+          <input type="text" id="mail-imap-host" required
+            value="${this._esc(modal.imapHost || "imap.gmail.com")}"
+            placeholder="imap.gmail.com"
+            ${testing ? "disabled" : ""} />
+        </div>
+        <div class="form-group">
+          <label for="mail-imap-port">Port</label>
+          <input type="number" id="mail-imap-port"
+            value="${modal.imapPort || 993}"
+            ${testing ? "disabled" : ""} />
+        </div>
+        <div class="form-group">
+          <label for="mail-imap-user">Email Address</label>
+          <input type="email" id="mail-imap-user" required
+            value="${this._esc(modal.imapUser || "")}"
+            placeholder="you@example.com"
+            ${testing ? "disabled" : ""} />
+        </div>
+        <div class="form-group">
+          <label for="mail-imap-password">Password / App Password</label>
+          <input type="password" id="mail-imap-password" ${isEdit ? "" : "required"}
+            value="${modal.imapPassword === "********" ? "********" : this._esc(modal.imapPassword || "")}"
+            placeholder="App password for Gmail"
+            ${testing ? "disabled" : ""} />
+          ${isEdit ? `<p class="hint">Leave as ******** to keep your existing password</p>` : ""}
+        </div>
+        ${modal.testError ? `
+          <div class="wizard-error">${this._esc(modal.testError)}</div>
+        ` : ""}
+        ${testing ? `
+          <div class="wizard-probing">
+            <div class="spinner small"></div>
+            <span>Connecting and listing folders...</span>
+          </div>
+        ` : ""}
+      </div>
+      <div class="wizard-footer">
+        <button type="button" class="btn" data-action="close-mail-account">Cancel</button>
+        <button type="button" class="btn btn-primary" data-action="mail-wizard-next" ${testing ? "disabled" : ""}>
+          Connect
+        </button>
+      </div>
+    `;
+  }
+
+  _renderMailWizardStep2(modal) {
+    const folders = modal.folders || [];
+    const selectedFolder = modal.folder || "INBOX";
+
+    return `
+      <div class="wizard-step-content">
+        <div class="wizard-carrier-result">
+          <span class="wizard-carrier-text">Connected to ${this._esc(modal.imapUser || "")}</span>
+        </div>
+        <div class="form-group">
+          <label for="mail-imap-folder">Mailbox Folder</label>
+          <select id="mail-imap-folder">
+            ${folders.map(folder => `
+              <option value="${this._esc(folder)}" ${folder === selectedFolder ? "selected" : ""}>
+                ${this._esc(folder)}
+              </option>
+            `).join("")}
+          </select>
+          <p class="hint">Choose where USPS Informed Delivery emails arrive (usually INBOX)</p>
+        </div>
+      </div>
+      <div class="wizard-footer">
+        <button type="button" class="btn btn-ghost" data-action="mail-wizard-back">Back</button>
+        <button type="button" class="btn btn-primary" data-action="mail-wizard-next">Next</button>
+      </div>
+    `;
+  }
+
+  _renderMailWizardStep3(modal) {
+    const submitting = modal.submitting;
+
+    return `
+      <div class="wizard-step-content">
+        <div class="form-group">
+          <label for="mail-label">Mail for</label>
+          <input type="text" id="mail-label" required
+            value="${this._esc(modal.label || "")}"
+            placeholder="e.g., Home, Mom, Office"
+            ${submitting ? "disabled" : ""} />
+          <p class="hint">Who this mail is for — used in announcements and package destinations</p>
+        </div>
+        <div class="wizard-summary">
+          <div class="wizard-summary-row">
+            <span class="wizard-summary-label">Email</span>
+            <span>${this._esc(modal.imapUser || "")}</span>
+          </div>
+          <div class="wizard-summary-row">
+            <span class="wizard-summary-label">Folder</span>
+            <span>${this._esc(modal.folder || "INBOX")}</span>
+          </div>
+          <div class="wizard-summary-row">
+            <span class="wizard-summary-label">Server</span>
+            <span>${this._esc(modal.imapHost || "")}:${modal.imapPort || 993}</span>
+          </div>
+        </div>
+      </div>
+      <div class="wizard-footer">
+        <button type="button" class="btn btn-ghost" data-action="mail-wizard-back" ${submitting ? "disabled" : ""}>Back</button>
+        <button type="button" class="btn btn-primary" data-action="mail-wizard-submit" ${submitting ? "disabled" : ""}>
+          ${submitting ? "Saving..." : modal.mode === "edit" ? "Save Address" : "Add Address"}
+        </button>
+      </div>
+    `;
+  }
+
+  _initMailAccountWizard(mode, account = null) {
+    if (mode === "edit" && account) {
+      return {
+        mode: "edit",
+        id: account.id,
+        step: 1,
+        imapHost: account.imap_host || "imap.gmail.com",
+        imapPort: account.imap_port || 993,
+        imapUser: account.imap_user || "",
+        imapPassword: account.imap_password ? "********" : "",
+        folders: [],
+        folder: account.folder || "INBOX",
+        label: account.label || "",
+        testing: false,
+        testError: null,
+        submitting: false,
+      };
+    }
+
+    return {
+      mode: "add",
+      id: null,
+      step: 1,
+      imapHost: "imap.gmail.com",
+      imapPort: 993,
+      imapUser: "",
+      imapPassword: "",
+      folders: [],
+      folder: "INBOX",
+      label: "",
+      testing: false,
+      testError: null,
+      submitting: false,
+    };
+  }
+
+  _renderAddPackageWizard() {
+    const wiz = this._addPackageWizard || { step: 1 };
+    const step = wiz.step || 1;
+    const accounts = this._getMailAccounts();
+
+    return `
+      <div class="modal-backdrop" data-action="close-wizard">
+        <div class="modal wizard-modal" onclick="event.stopPropagation()">
           <div class="modal-header">
             <h2>Add Package</h2>
-            <button class="close-btn" data-action="close-add">&times;</button>
+            <button class="close-btn" data-action="close-wizard">&times;</button>
           </div>
-          <form class="modal-body" id="add-package-form">
-            <div class="form-group">
-              <label for="tracking-number">Tracking Number *</label>
-              <input type="text" id="tracking-number" required placeholder="e.g., 9400111899560438600329" />
-              <p class="hint">Carrier will be auto-detected</p>
+          <div class="wizard-progress">
+            <div class="wizard-step-indicator ${step >= 1 ? "active" : ""} ${step > 1 ? "completed" : ""}">
+              <span class="wizard-step-num">1</span>
+              <span class="wizard-step-label">Tracking</span>
             </div>
-            <div class="form-group">
-              <label for="recipient">Who it's for</label>
-              <input type="text" id="recipient" placeholder="e.g., Mom, John" />
+            <div class="wizard-step-connector ${step > 1 ? "completed" : ""}"></div>
+            <div class="wizard-step-indicator ${step >= 2 ? "active" : ""} ${step > 2 ? "completed" : ""}">
+              <span class="wizard-step-num">2</span>
+              <span class="wizard-step-label">Recipient</span>
             </div>
-            <div class="form-group">
-              <label for="destination">Destination</label>
-              <input type="text" id="destination" placeholder="e.g., Home, Work" />
+            <div class="wizard-step-connector ${step > 2 ? "completed" : ""}"></div>
+            <div class="wizard-step-indicator ${step >= 3 ? "active" : ""}">
+              <span class="wizard-step-num">3</span>
+              <span class="wizard-step-label">Destination</span>
             </div>
-            <div class="form-actions">
-              <button type="button" class="btn" data-action="close-add">Cancel</button>
-              <button type="submit" class="btn btn-primary">Add Package</button>
-            </div>
-          </form>
+          </div>
+          <div class="modal-body wizard-body">
+            ${step === 1 ? this._renderWizardStep1(wiz) : ""}
+            ${step === 2 ? this._renderWizardStep2(wiz) : ""}
+            ${step === 3 ? this._renderWizardStep3(wiz, accounts) : ""}
+          </div>
         </div>
+      </div>
+    `;
+  }
+
+  _renderWizardStep1(wiz) {
+    const probing = wiz.probing;
+    const probeError = wiz.probeError;
+    const carrier = wiz.carrier;
+
+    return `
+      <div class="wizard-step-content">
+        <div class="form-group">
+          <label for="wizard-tracking">Tracking Number *</label>
+          <input type="text" id="wizard-tracking" required
+            placeholder="e.g., 9400111899560438600329"
+            value="${this._esc(wiz.tracking || "")}"
+            ${probing ? "disabled" : ""} />
+          <p class="hint">We'll check USPS, UPS, and FedEx automatically</p>
+        </div>
+        ${carrier ? `
+          <div class="wizard-carrier-result">
+            ${this._carrierBadge(carrier)}
+            <span class="wizard-carrier-text">Carrier detected</span>
+          </div>
+        ` : ""}
+        ${probeError ? `
+          <div class="wizard-error">${this._esc(probeError)}</div>
+        ` : ""}
+        ${probing ? `
+          <div class="wizard-probing">
+            <div class="spinner small"></div>
+            <span>Detecting carrier...</span>
+          </div>
+        ` : ""}
+      </div>
+      <div class="wizard-footer">
+        <button type="button" class="btn" data-action="close-wizard">Cancel</button>
+        <button type="button" class="btn btn-primary" data-action="wizard-next" ${probing ? "disabled" : ""}>
+          ${carrier ? "Next" : "Detect Carrier"}
+        </button>
+      </div>
+    `;
+  }
+
+  _renderWizardStep2(wiz) {
+    return `
+      <div class="wizard-step-content">
+        <div class="form-group">
+          <label for="wizard-recipient">Who is this package for?</label>
+          <input type="text" id="wizard-recipient"
+            placeholder="e.g., Mom, John, Office"
+            value="${this._esc(wiz.recipient || "")}" />
+          <p class="hint">Optional — used for announcements</p>
+        </div>
+        <div class="wizard-carrier-summary">
+          ${this._carrierBadge(wiz.carrier)}
+          <span class="wizard-tracking-preview">${this._esc(wiz.tracking || "")}</span>
+        </div>
+      </div>
+      <div class="wizard-footer">
+        <button type="button" class="btn btn-ghost" data-action="wizard-back">Back</button>
+        <button type="button" class="btn btn-primary" data-action="wizard-next">Next</button>
+      </div>
+    `;
+  }
+
+  _renderWizardStep3(wiz, accounts) {
+    const showOtherInput = wiz.destinationMode === "other";
+    const hasAccounts = accounts.length > 0;
+
+    return `
+      <div class="wizard-step-content">
+        <div class="form-group">
+          <label for="wizard-destination-select">Destination</label>
+          ${hasAccounts ? `
+            <select id="wizard-destination-select">
+              <option value="">Select destination...</option>
+              ${accounts.map(a => `
+                <option value="${this._esc(a.id)}" ${wiz.destinationAccountId === a.id ? "selected" : ""}>
+                  ${this._esc(a.label || a.imap_user || "Address")}
+                </option>
+              `).join("")}
+              <option value="other" ${wiz.destinationMode === "other" ? "selected" : ""}>Other (enter manually)</option>
+            </select>
+          ` : `
+            <p class="hint">No mail addresses configured — enter destination manually</p>
+          `}
+        </div>
+        ${showOtherInput || !hasAccounts ? `
+          <div class="form-group">
+            <label for="wizard-destination-other">${hasAccounts ? "Enter destination" : "Destination"}</label>
+            <input type="text" id="wizard-destination-other"
+              placeholder="e.g., Home, Work, Grandma's"
+              value="${this._esc(wiz.destinationOther || "")}" />
+          </div>
+        ` : ""}
+        ${!hasAccounts ? `
+          <p class="hint">
+            <a href="#" data-action="configure-mail" class="link">Add mail addresses</a> in Settings to use as destinations
+          </p>
+        ` : ""}
+        <div class="wizard-summary">
+          <div class="wizard-summary-row">
+            ${this._carrierBadge(wiz.carrier)}
+            <span>${this._esc(wiz.tracking || "")}</span>
+          </div>
+          ${wiz.recipient ? `
+            <div class="wizard-summary-row">
+              <span class="wizard-summary-label">For:</span>
+              <span>${this._esc(wiz.recipient)}</span>
+            </div>
+          ` : ""}
+        </div>
+      </div>
+      <div class="wizard-footer">
+        <button type="button" class="btn btn-ghost" data-action="wizard-back">Back</button>
+        <button type="button" class="btn btn-primary" data-action="wizard-submit" ${wiz.submitting ? "disabled" : ""}>
+          ${wiz.submitting ? "Adding..." : "Add Package"}
+        </button>
       </div>
     `;
   }
@@ -1016,24 +1723,37 @@ class HomeDeliveryPanel extends HTMLElement {
       form.addEventListener("change", onChange);
     }
 
-    const addForm = s.querySelector("#add-package-form");
-    if (addForm) {
-      addForm.addEventListener("submit", async (e) => {
-        e.preventDefault();
-        const tracking = s.querySelector("#tracking-number")?.value?.trim();
-        const recipient = s.querySelector("#recipient")?.value?.trim();
-        const destination = s.querySelector("#destination")?.value?.trim();
-        if (!tracking) return;
-        try {
-          await this._addPackage({ tracking_number: tracking, recipient, destination });
-          this._addPackageModal = false;
+    // Wizard destination select handler
+    const destSelect = s.querySelector("#wizard-destination-select");
+    if (destSelect) {
+      destSelect.addEventListener("change", () => {
+        const value = destSelect.value;
+        if (this._addPackageWizard) {
+          if (value === "other") {
+            this._addPackageWizard.destinationMode = "other";
+            this._addPackageWizard.destinationAccountId = null;
+          } else if (value) {
+            this._addPackageWizard.destinationMode = "account";
+            this._addPackageWizard.destinationAccountId = value;
+            const account = this._getMailAccount(value);
+            if (account) {
+              this._addPackageWizard.destinationOther = account.label || "";
+            }
+          } else {
+            this._addPackageWizard.destinationMode = null;
+            this._addPackageWizard.destinationAccountId = null;
+          }
           this._render();
-          this._showToast("Package added");
-        } catch (err) {
-          this._showToast(err.message, { error: true });
         }
       });
     }
+
+    s.querySelectorAll('[data-action="toggle-mail-account"]').forEach(el => {
+      el.addEventListener("change", (e) => {
+        e.stopPropagation();
+        this._handleAction(e, "toggle-mail-account", el.dataset);
+      });
+    });
   }
 
   _attachSettingsHandlers() {
@@ -1055,12 +1775,21 @@ class HomeDeliveryPanel extends HTMLElement {
   async _handleAction(e, action, data) {
     switch (action) {
       case "add-package":
-        this._addPackageModal = true;
+        this._addPackageWizard = { step: 1, tracking: "", carrier: null, recipient: "", destinationAccountId: null, destinationOther: "", destinationMode: null, probing: false, probeError: null, submitting: false };
         this._render();
         break;
-      case "close-add":
-        this._addPackageModal = false;
+      case "close-wizard":
+        this._addPackageWizard = null;
         this._render();
+        break;
+      case "wizard-next":
+        await this._handleWizardNext();
+        break;
+      case "wizard-back":
+        this._handleWizardBack();
+        break;
+      case "wizard-submit":
+        await this._handleWizardSubmit();
         break;
       case "refresh":
         await this._refreshPackage(data.id);
@@ -1081,19 +1810,57 @@ class HomeDeliveryPanel extends HTMLElement {
         }
         break;
       case "refresh-mail":
-        try {
-          await this._fetchApi("/api/mail/refresh", { method: "POST" });
-          const mailResp = await this._fetchApi("/api/mail");
-          this._mailState = mailResp;
-          this._render();
-          this._showToast("Mail checked");
-        } catch (err) {
-          this._showToast(err.message, { error: true });
-        }
+        await this._syncMail();
+        break;
+      case "sync-mail":
+        await this._syncMail();
         break;
       case "configure-mail":
         this._openSettingsPane("mail");
         break;
+      case "add-mail-account":
+        this._mailAccountModal = this._initMailAccountWizard("add");
+        this._render();
+        break;
+      case "close-mail-account":
+        this._mailAccountModal = null;
+        this._render();
+        break;
+      case "mail-wizard-next":
+        await this._handleMailWizardNext();
+        break;
+      case "mail-wizard-back":
+        this._handleMailWizardBack();
+        break;
+      case "mail-wizard-submit":
+        await this._handleMailWizardSubmit();
+        break;
+      case "edit-mail-account":
+        this._mailAccountModal = this._initMailAccountWizard("edit", this._getMailAccount(data.id));
+        this._render();
+        break;
+      case "delete-mail-account":
+        if (confirm("Remove this mail address?")) {
+          this._settings.mail.accounts = this._getMailAccounts().filter(a => a.id !== data.id);
+          await this._persistMailAccounts();
+          const mailResp = await this._fetchApi("/api/mail");
+          this._mailState = mailResp;
+          this._render();
+          this._showToast("Address removed");
+        }
+        break;
+      case "toggle-mail-account": {
+        const account = this._getMailAccount(data.id);
+        const checkbox = this.shadowRoot?.querySelector(`[data-action="toggle-mail-account"][data-id="${data.id}"]`);
+        if (account && checkbox) {
+          account.enabled = checkbox.checked;
+          await this._persistMailAccounts();
+          const mailResp = await this._fetchApi("/api/mail");
+          this._mailState = mailResp;
+          this._render();
+        }
+        break;
+      }
       case "nav-back":
         this._navigateTo(this._settingsReturnView || "dashboard");
         break;
@@ -1124,12 +1891,20 @@ class HomeDeliveryPanel extends HTMLElement {
         --dur-fast: 0.15s;
         --dur-normal: 0.25s;
         --ease: cubic-bezier(0.4, 0, 0.2, 1);
+        --safe-top: env(safe-area-inset-top, 0px);
+        --safe-bottom: env(safe-area-inset-bottom, 0px);
+        --safe-left: env(safe-area-inset-left, 0px);
+        --safe-right: env(safe-area-inset-right, 0px);
 
         display: block;
-        min-height: 100vh;
+        width: 100%;
+        min-height: 100%;
+        padding: 0;
+        max-width: none;
+        margin: 0;
         background: var(--hd-bg);
         color: var(--hd-text);
-        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        font-family: var(--paper-font-body1_-_font-family, "Roboto", "Segoe UI", sans-serif);
         line-height: 1.5;
       }
 
@@ -1138,18 +1913,24 @@ class HomeDeliveryPanel extends HTMLElement {
       /* ======================== HUD Wrapper + App Shell ======================== */
 
       .hud-wrapper {
-        min-height: 100vh;
-        display: flex;
-        flex-direction: column;
+        position: relative;
+        min-height: 100%;
+        overflow: auto;
+      }
+
+      .hud-wrapper::before,
+      .hud-wrapper::after {
+        content: none;
       }
 
       .delivery-app {
-        flex: 1;
+        padding: 0;
         display: flex;
         flex-direction: column;
-        max-width: 1600px;
-        width: 100%;
-        margin: 0 auto;
+        gap: 0;
+        height: 100%;
+        min-height: 0;
+        min-width: 0;
       }
 
       /* ======================== Topbar ======================== */
@@ -1159,32 +1940,54 @@ class HomeDeliveryPanel extends HTMLElement {
         top: 0;
         z-index: 100;
         display: flex;
+        flex-wrap: nowrap;
         align-items: center;
-        height: var(--header-height);
-        padding: 0 var(--space-4);
+        gap: var(--space-2) var(--space-3);
+        min-width: 0;
+        box-sizing: border-box;
+        height: var(--header-height, 64px);
+        min-height: var(--header-height, 64px);
+        max-height: var(--header-height, 64px);
+        padding: 0 calc(var(--space-3) + var(--safe-right)) 0 calc(var(--space-3) + var(--safe-left));
         background: var(--hd-surface);
         border-bottom: 1px solid var(--hd-border-strong);
-        gap: var(--space-2);
+      }
+
+      .topbar .icon-btn {
+        flex-shrink: 0;
+        width: 40px;
+        min-width: 40px;
+        height: 40px;
+        min-height: 40px;
       }
 
       .title-card {
         flex: 1;
         min-width: 0;
+        display: flex;
+        align-items: center;
+        padding: 0 var(--space-2) 0 0;
+        background: transparent;
+        border: none;
+        box-shadow: none;
+        border-radius: 0;
       }
 
       .title-wrap {
-        display: flex;
-        align-items: center;
-        gap: var(--space-2);
+        min-width: 0;
+        flex: 1;
+        overflow: hidden;
       }
 
       .title {
-        font-size: clamp(16px, 2vw, 20px);
+        font-size: clamp(15px, 1.8vw, 18px);
+        line-height: 1.2;
         font-weight: 600;
-        color: var(--hd-accent);
+        letter-spacing: -0.02em;
         white-space: nowrap;
         overflow: hidden;
         text-overflow: ellipsis;
+        color: var(--hd-text);
       }
 
       .icon-btn {
@@ -1220,20 +2023,40 @@ class HomeDeliveryPanel extends HTMLElement {
         to { transform: rotate(360deg); }
       }
 
-      .hamburger {
+      .topbar .hamburger.icon-btn {
         display: none;
       }
 
       @media (max-width: 768px) {
-        .hamburger { display: flex; }
+        .topbar .hamburger.icon-btn { display: inline-flex; }
+      }
+
+      .narrow .topbar .hamburger.icon-btn {
+        display: inline-flex;
       }
 
       /* ======================== Content Area ======================== */
 
       .content-area {
         flex: 1;
-        padding: var(--space-4);
-        padding-bottom: calc(var(--space-5) + env(safe-area-inset-bottom, 0px));
+        min-height: 0;
+        min-width: 0;
+        width: 100%;
+        max-width: 100%;
+        margin: 0;
+        padding: clamp(var(--space-3), 3vw, var(--space-5));
+        padding-bottom: calc(clamp(var(--space-3), 3vw, var(--space-5)) + var(--safe-bottom));
+        box-sizing: border-box;
+        display: flex;
+        flex-direction: column;
+        overflow-x: hidden;
+      }
+
+      @media (min-width: 1200px) {
+        .content-area {
+          max-width: 1600px;
+          margin: 0 auto;
+        }
       }
 
       .dashboard {
@@ -1342,6 +2165,167 @@ class HomeDeliveryPanel extends HTMLElement {
         font-size: 12px;
         color: var(--hd-muted);
         margin-top: var(--space-3);
+      }
+
+      .mail-meta-warn {
+        color: var(--hd-warning);
+      }
+
+      /* ======================== Mail Accounts Settings ======================== */
+
+      .mail-accounts-card {
+        display: flex;
+        flex-direction: column;
+      }
+
+      .mail-accounts-empty {
+        text-align: center;
+        padding: var(--space-5) var(--space-3);
+        color: var(--hd-muted);
+      }
+
+      .mail-accounts-empty p {
+        margin: var(--space-2) 0 0;
+      }
+
+      .mail-accounts-list {
+        display: flex;
+        flex-direction: column;
+        gap: var(--space-3);
+        margin-bottom: var(--space-4);
+      }
+
+      .mail-account-card {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: var(--space-3);
+        padding: var(--space-3);
+        background: var(--hd-elevated);
+        border: 1px solid var(--hd-border);
+        border-radius: var(--radius-md);
+      }
+
+      .mail-account-card.active {
+        border-color: var(--hd-accent);
+      }
+
+      .mail-account-card.disabled {
+        opacity: 0.65;
+      }
+
+      .mail-account-card.error {
+        border-color: var(--hd-danger);
+      }
+
+      .mail-account-main {
+        flex: 1;
+        min-width: 0;
+      }
+
+      .mail-account-label {
+        font-size: 15px;
+        font-weight: 600;
+        margin-bottom: 2px;
+      }
+
+      .mail-account-email {
+        font-size: 13px;
+        color: var(--hd-muted);
+        word-break: break-all;
+      }
+
+      .mail-account-meta {
+        font-size: 12px;
+        color: var(--hd-muted);
+        margin-top: var(--space-2);
+        display: flex;
+        flex-wrap: wrap;
+        gap: var(--space-1);
+      }
+
+      .mail-account-dot {
+        opacity: 0.5;
+      }
+
+      .mail-account-error {
+        font-size: 12px;
+        color: var(--hd-danger);
+        margin-top: var(--space-2);
+      }
+
+      .mail-account-actions {
+        display: flex;
+        flex-direction: column;
+        align-items: flex-end;
+        gap: var(--space-2);
+        flex-shrink: 0;
+      }
+
+      .mail-add-btn {
+        width: 100%;
+        justify-content: center;
+        border-style: dashed;
+      }
+
+      .mail-sync-footer {
+        padding: var(--space-4);
+        border-top: 1px solid var(--hd-border);
+        background: var(--hd-surface-2);
+      }
+
+      .mail-sync-footer .hint {
+        text-align: center;
+        margin-top: var(--space-2);
+        margin-bottom: 0;
+      }
+
+      .btn-full {
+        width: 100%;
+        justify-content: center;
+      }
+
+      .toggle-switch {
+        position: relative;
+        display: inline-block;
+        width: 44px;
+        height: 24px;
+        flex-shrink: 0;
+      }
+
+      .toggle-switch input {
+        opacity: 0;
+        width: 0;
+        height: 0;
+      }
+
+      .toggle-slider {
+        position: absolute;
+        cursor: pointer;
+        inset: 0;
+        background: var(--hd-border-strong);
+        border-radius: 24px;
+        transition: background var(--dur-fast) var(--ease);
+      }
+
+      .toggle-slider:before {
+        position: absolute;
+        content: "";
+        height: 18px;
+        width: 18px;
+        left: 3px;
+        bottom: 3px;
+        background: #fff;
+        border-radius: 50%;
+        transition: transform var(--dur-fast) var(--ease);
+      }
+
+      .toggle-switch input:checked + .toggle-slider {
+        background: var(--hd-accent);
+      }
+
+      .toggle-switch input:checked + .toggle-slider:before {
+        transform: translateX(20px);
       }
 
       /* ======================== Packages ======================== */
@@ -2024,6 +3008,202 @@ class HomeDeliveryPanel extends HTMLElement {
       .error p {
         color: var(--hd-danger);
         margin-bottom: var(--space-4);
+      }
+
+      /* ======================== Wizard ======================== */
+
+      .wizard-modal {
+        max-width: 480px;
+      }
+
+      .wizard-progress {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: var(--space-3) var(--space-4);
+        background: var(--hd-surface-2);
+        border-bottom: 1px solid var(--hd-border);
+        gap: var(--space-2);
+      }
+
+      .wizard-step-indicator {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 4px;
+        min-width: 60px;
+      }
+
+      .wizard-step-num {
+        width: 28px;
+        height: 28px;
+        border-radius: 50%;
+        background: var(--hd-border);
+        color: var(--hd-muted);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 12px;
+        font-weight: 600;
+        transition: all var(--dur-fast) var(--ease);
+      }
+
+      .wizard-step-indicator.active .wizard-step-num {
+        background: var(--hd-accent);
+        color: #fff;
+      }
+
+      .wizard-step-indicator.completed .wizard-step-num {
+        background: var(--hd-success);
+        color: #fff;
+      }
+
+      .wizard-step-label {
+        font-size: 11px;
+        color: var(--hd-muted);
+        font-weight: 500;
+      }
+
+      .wizard-step-indicator.active .wizard-step-label {
+        color: var(--hd-text);
+      }
+
+      .wizard-step-connector {
+        width: 40px;
+        height: 2px;
+        background: var(--hd-border);
+        transition: background var(--dur-fast) var(--ease);
+      }
+
+      .wizard-step-connector.completed {
+        background: var(--hd-success);
+      }
+
+      .wizard-body {
+        display: flex;
+        flex-direction: column;
+        min-height: 200px;
+      }
+
+      .wizard-step-content {
+        flex: 1;
+        padding: var(--space-4);
+      }
+
+      .wizard-footer {
+        display: flex;
+        justify-content: space-between;
+        gap: var(--space-3);
+        padding: var(--space-3) var(--space-4);
+        border-top: 1px solid var(--hd-border);
+        background: var(--hd-surface-2);
+      }
+
+      .wizard-footer .btn:first-child {
+        margin-right: auto;
+      }
+
+      .btn-ghost {
+        background: transparent;
+        border-color: transparent;
+      }
+
+      .btn-ghost:hover {
+        background: var(--hd-hover);
+        border-color: var(--hd-border);
+      }
+
+      .wizard-carrier-result {
+        display: flex;
+        align-items: center;
+        gap: var(--space-2);
+        padding: var(--space-3);
+        background: var(--hd-accent-dim);
+        border-radius: var(--radius-md);
+        margin-top: var(--space-3);
+      }
+
+      .wizard-carrier-text {
+        font-size: 14px;
+        color: var(--hd-accent);
+        font-weight: 500;
+      }
+
+      .wizard-error {
+        padding: var(--space-3);
+        background: rgba(244, 67, 54, 0.1);
+        border: 1px solid var(--hd-danger);
+        border-radius: var(--radius-md);
+        color: var(--hd-danger);
+        font-size: 13px;
+        margin-top: var(--space-3);
+      }
+
+      .wizard-probing {
+        display: flex;
+        align-items: center;
+        gap: var(--space-3);
+        padding: var(--space-3);
+        color: var(--hd-muted);
+        font-size: 14px;
+        margin-top: var(--space-3);
+      }
+
+      .spinner.small {
+        width: 20px;
+        height: 20px;
+        border-width: 2px;
+      }
+
+      .wizard-carrier-summary {
+        display: flex;
+        align-items: center;
+        gap: var(--space-2);
+        padding: var(--space-3);
+        background: var(--hd-surface-2);
+        border-radius: var(--radius-md);
+        margin-top: var(--space-4);
+      }
+
+      .wizard-tracking-preview {
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, monospace;
+        font-size: 12px;
+        color: var(--hd-muted);
+        word-break: break-all;
+      }
+
+      .wizard-summary {
+        margin-top: var(--space-4);
+        padding: var(--space-3);
+        background: var(--hd-surface-2);
+        border-radius: var(--radius-md);
+      }
+
+      .wizard-summary-row {
+        display: flex;
+        align-items: center;
+        gap: var(--space-2);
+        font-size: 13px;
+      }
+
+      .wizard-summary-row + .wizard-summary-row {
+        margin-top: var(--space-2);
+        padding-top: var(--space-2);
+        border-top: 1px solid var(--hd-border);
+      }
+
+      .wizard-summary-label {
+        color: var(--hd-muted);
+        min-width: 40px;
+      }
+
+      .link {
+        color: var(--hd-accent);
+        text-decoration: none;
+      }
+
+      .link:hover {
+        text-decoration: underline;
       }
     `;
   }
