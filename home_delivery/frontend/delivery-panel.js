@@ -2,7 +2,7 @@
  * Home Delivery Panel - Vanilla JS for HA custom panel / standalone Ingress
  * Design aligned with home-weather: topbar + gear settings, dashboard layout.
  */
-const PANEL_VERSION = "0.0.5";
+const PANEL_VERSION = "0.0.6";
 
 class HomeDeliveryPanel extends HTMLElement {
   constructor() {
@@ -30,6 +30,7 @@ class HomeDeliveryPanel extends HTMLElement {
     this._refreshingAll = false;
     this._mailAccountModal = null;
     this._mailSyncing = false;
+    this._mailSyncAccountId = null;
     this._dashboardSettled = false;
   }
 
@@ -80,9 +81,55 @@ class HomeDeliveryPanel extends HTMLElement {
   // ============================================================================
 
   _getApiBase() {
-    const path = window.location.pathname;
-    const match = path.match(/^(\/api\/hassio_ingress\/[^/]+)/);
+    const path = window.location.pathname || "";
+    const match = path.match(/^(\/api\/(?:hassio_ingress|ingress)\/[^/]+)/);
     return match ? match[1] : "";
+  }
+
+  _apiUrl(path) {
+    const normalized = path.startsWith("/") ? path : `/${path}`;
+    const base = this._getApiBase();
+    return base ? `${base}${normalized}` : normalized;
+  }
+
+  _isHomeMailLabel(label) {
+    const normalized = String(label || "").trim().toLowerCase();
+    return normalized === "home"
+      || normalized.startsWith("home,")
+      || normalized.startsWith("home ");
+  }
+
+  _getHomeMailAccount(accounts = []) {
+    const list = Array.isArray(accounts) ? accounts : [];
+    const enabled = list.filter((account) => account.enabled !== false);
+    const candidates = enabled.length ? enabled : list;
+    return candidates.find((account) => this._isHomeMailLabel(account.label))
+      || candidates[0]
+      || null;
+  }
+
+  _getOtherMailAccounts(accounts = []) {
+    const list = Array.isArray(accounts) ? accounts : [];
+    const home = this._getHomeMailAccount(list);
+    return list.filter((account) => account.enabled !== false && account.id !== home?.id);
+  }
+
+  _mailPreviewHtml(gifUrl, label = "Mail preview") {
+    if (!gifUrl) {
+      return `
+        <div class="mail-preview mail-preview--placeholder" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="56" height="56" fill="currentColor"><path d="M20 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 4l-8 5-8-5V6l8 5 8-5v2z"/></svg>
+        </div>
+      `;
+    }
+
+    const src = this._apiUrl(gifUrl);
+    return `
+      <div class="mail-preview">
+        <img src="${this._esc(src)}" alt="${this._esc(label)}" loading="lazy"
+          onerror="this.closest('.mail-preview')?.classList.add('mail-preview--broken'); this.remove();" />
+      </div>
+    `;
   }
 
   /** True when running inside Home Assistant ingress iframe. */
@@ -583,6 +630,7 @@ class HomeDeliveryPanel extends HTMLElement {
 
   async _syncMail(accountId = null) {
     this._mailSyncing = true;
+    this._mailSyncAccountId = accountId;
     this._render();
     try {
       await this._saveSettings({ silent: true });
@@ -608,6 +656,7 @@ class HomeDeliveryPanel extends HTMLElement {
       this._showToast(err.message, { error: true });
     } finally {
       this._mailSyncing = false;
+      this._mailSyncAccountId = null;
       this._render();
     }
   }
@@ -1048,6 +1097,7 @@ class HomeDeliveryPanel extends HTMLElement {
       <section class="dashboard${settled}">
         ${this._renderMailHero()}
         ${this._renderStatsStrip()}
+        ${this._renderOtherMailSection()}
         <div class="dashboard-bento">
           ${this._renderPackagesSection()}
           ${this._renderDeliveredSection()}
@@ -1058,9 +1108,11 @@ class HomeDeliveryPanel extends HTMLElement {
 
   _renderStatsStrip() {
     const mail = this._mailState || {};
+    const accounts = mail.accounts || [];
+    const home = this._getHomeMailAccount(accounts);
     const active = this._packages.filter(p => !p.delivered);
     const delivered = this._packages.filter(p => p.delivered);
-    const mailCount = mail.configured ? (mail.piece_count ?? 0) : "—";
+    const mailCount = home ? (home.piece_count ?? 0) : (mail.configured ? 0 : "—");
 
     return `
       <div class="stats-strip" role="list" aria-label="Delivery overview">
@@ -1080,11 +1132,60 @@ class HomeDeliveryPanel extends HTMLElement {
     `;
   }
 
+  _renderOtherMailSection() {
+    const mail = this._mailState || {};
+    if (!mail.configured) return "";
+
+    const others = this._getOtherMailAccounts(mail.accounts || []);
+    if (others.length === 0) return "";
+
+    return `
+      <section class="mail-other-section" aria-label="Other mail addresses">
+        <div class="mail-other-head">
+          <div class="mail-other-title">Other Addresses</div>
+          <div class="mail-other-sub">${others.length} address${others.length === 1 ? "" : "es"}</div>
+        </div>
+        <div class="mail-other-grid">
+          ${others.map((account) => this._renderOtherMailCard(account)).join("")}
+        </div>
+      </section>
+    `;
+  }
+
+  _renderOtherMailCard(account) {
+    const lastCheckStr = account.last_check
+      ? new Date(account.last_check).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })
+      : "";
+    const label = account.label || account.imap_user || "Address";
+    const syncing = this._mailSyncing && this._mailSyncAccountId === account.id;
+
+    return `
+      <article class="glass card mail-other-card ${account.last_error ? "has-error" : ""}">
+        <div class="mail-other-card-head">
+          <div>
+            <div class="mail-other-label">${this._esc(label)}</div>
+            ${lastCheckStr ? `<div class="mail-other-meta">Last checked: ${lastCheckStr}</div>` : ""}
+          </div>
+          <button class="btn btn-sm btn-ghost" data-action="refresh-mail" data-id="${account.id}" ${syncing ? "disabled" : ""}>
+            ${syncing ? "..." : "Check"}
+          </button>
+        </div>
+        <div class="mail-other-body">
+          <div class="mail-other-count">${account.piece_count || 0}</div>
+          <div class="mail-other-count-label">pieces arriving</div>
+        </div>
+        ${this._mailPreviewHtml(account.gif_url, `${label} mail preview`)}
+        ${account.last_error ? `<div class="mail-other-error">${this._esc(account.last_error)}</div>` : ""}
+      </article>
+    `;
+  }
+
   _renderMailHero() {
     const mail = this._mailState || {};
     const configured = mail.configured;
     const enabled = mail.enabled;
     const accounts = mail.accounts || [];
+    const home = this._getHomeMailAccount(accounts);
 
     if (!configured) {
       return `
@@ -1101,11 +1202,12 @@ class HomeDeliveryPanel extends HTMLElement {
       `;
     }
 
-    const lastCheckStr = mail.last_check ? new Date(mail.last_check).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : "";
-    const accountLabels = accounts.filter(a => a.enabled !== false).map(a => a.label).filter(Boolean);
-    const subLabel = accountLabels.length > 1
-      ? `${accountLabels.join(", ")}`
-      : accountLabels[0] || "USPS Informed Delivery";
+    const lastCheckStr = home?.last_check
+      ? new Date(home.last_check).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })
+      : "";
+    const subLabel = home?.label || "Home";
+    const pieceCount = home?.piece_count || 0;
+    const homeSyncing = this._mailSyncing && (!this._mailSyncAccountId || this._mailSyncAccountId === home?.id);
 
     return `
       <article class="glass card mail-hero-card">
@@ -1117,24 +1219,19 @@ class HomeDeliveryPanel extends HTMLElement {
               <div class="card-title">Mail Today</div>
               <div class="card-sub">${this._esc(subLabel)}</div>
             </div>
-            <button class="btn btn-sm btn-ghost" data-action="refresh-mail">Check Now</button>
+            <button class="btn btn-sm btn-ghost" data-action="refresh-mail" ${home?.id ? `data-id="${home.id}"` : ""} ${homeSyncing ? "disabled" : ""}>
+              ${homeSyncing ? "Checking..." : "Check Now"}
+            </button>
           </div>
           <div class="mail-hero-stage">
             <div class="mail-hero-main">
-              <div class="mail-count-large">${mail.piece_count || 0}</div>
+              <div class="mail-count-large">${pieceCount}</div>
               <div class="mail-count-label">pieces arriving</div>
             </div>
-            ${mail.gif_url ? `
-              <div class="mail-preview">
-                <img src="${this._getApiBase()}${mail.gif_url}" alt="Mail Preview" loading="lazy" />
-              </div>
-            ` : `
-              <div class="mail-preview mail-preview--placeholder" aria-hidden="true">
-                <svg viewBox="0 0 24 24" width="56" height="56" fill="currentColor"><path d="M20 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 4l-8 5-8-5V6l8 5 8-5v2z"/></svg>
-              </div>
-            `}
+            ${this._mailPreviewHtml(home?.gif_url, `${subLabel} mail preview`)}
           </div>
           ${lastCheckStr ? `<div class="mail-meta">Last checked: ${lastCheckStr}</div>` : ""}
+          ${home?.last_error ? `<div class="mail-meta mail-meta-warn">${this._esc(home.last_error)}</div>` : ""}
           ${!enabled ? `<div class="mail-meta mail-meta-warn">All addresses are disabled — enable one in Settings</div>` : ""}
         </div>
       </article>
@@ -1940,7 +2037,7 @@ class HomeDeliveryPanel extends HTMLElement {
         }
         break;
       case "refresh-mail":
-        await this._syncMail();
+        await this._syncMail(data.id || null);
         break;
       case "sync-mail":
         await this._syncMail();
@@ -2572,6 +2669,119 @@ class HomeDeliveryPanel extends HTMLElement {
 
       .mail-meta-warn {
         color: var(--hd-warning);
+      }
+
+      .mail-preview--broken {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 120px;
+        border-radius: var(--radius-md);
+        border: 1px dashed var(--hd-border-strong);
+        background: var(--hd-elevated);
+        color: var(--hd-muted);
+        font-size: 12px;
+      }
+
+      .mail-preview--broken::after {
+        content: "Preview unavailable";
+      }
+
+      .mail-other-section {
+        display: flex;
+        flex-direction: column;
+        gap: var(--space-3);
+        min-width: 0;
+      }
+
+      .mail-other-head {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: var(--space-2);
+        padding: 0 var(--space-1);
+      }
+
+      .mail-other-title {
+        font-size: 15px;
+        font-weight: 600;
+        color: var(--hd-text);
+      }
+
+      .mail-other-sub {
+        font-size: 12px;
+        color: var(--hd-muted);
+      }
+
+      .mail-other-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(min(100%, 240px), 1fr));
+        gap: var(--space-3);
+      }
+
+      .mail-other-card {
+        padding: var(--space-3);
+        display: flex;
+        flex-direction: column;
+        gap: var(--space-3);
+      }
+
+      .mail-other-card.has-error {
+        border-color: var(--hd-danger);
+      }
+
+      .mail-other-card-head {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: var(--space-2);
+      }
+
+      .mail-other-label {
+        font-size: 14px;
+        font-weight: 600;
+        color: var(--hd-text);
+      }
+
+      .mail-other-meta {
+        font-size: 11px;
+        color: var(--hd-muted);
+        margin-top: 2px;
+      }
+
+      .mail-other-body {
+        display: flex;
+        align-items: baseline;
+        gap: var(--space-2);
+      }
+
+      .mail-other-count {
+        font-size: clamp(28px, 7vw, 36px);
+        font-weight: 700;
+        color: var(--hd-accent);
+        line-height: 1;
+        font-variant-numeric: tabular-nums;
+      }
+
+      .mail-other-count-label {
+        font-size: 12px;
+        color: var(--hd-muted);
+      }
+
+      .mail-other-card .mail-preview {
+        max-width: none;
+        justify-self: stretch;
+      }
+
+      .mail-other-card .mail-preview img {
+        max-height: 140px;
+        object-fit: contain;
+        background: var(--hd-bg);
+      }
+
+      .mail-other-error {
+        font-size: 11px;
+        color: var(--hd-danger);
       }
 
       /* ======================== Mail Accounts Settings ======================== */

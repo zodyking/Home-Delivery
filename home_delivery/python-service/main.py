@@ -31,7 +31,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Code version for deployment verification
-CODE_VERSION = "0.0.5"
+CODE_VERSION = "0.0.6"
 
 app = FastAPI(title="Home Delivery API")
 
@@ -366,6 +366,12 @@ async def get_mail():
                 "piece_count": a.get("piece_count", 0),
                 "last_check": a.get("last_check"),
                 "last_error": a.get("last_error"),
+                "gif_filename": a.get("gif_filename"),
+                "gif_url": (
+                    f"/api/mail/image/{a['gif_filename']}"
+                    if a.get("gif_filename")
+                    else None
+                ),
             }
             for a in mail_state.get("accounts", [])
         ],
@@ -538,7 +544,11 @@ async def get_mail_image(filename: str):
     if not image_path.exists():
         raise HTTPException(status_code=404, detail="Image not found")
 
-    return FileResponse(image_path, media_type="image/gif")
+    return FileResponse(
+        image_path,
+        media_type="image/gif",
+        headers={"Cache-Control": "public, max-age=300"},
+    )
 
 
 # ============================================================================
