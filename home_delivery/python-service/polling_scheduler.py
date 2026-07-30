@@ -58,6 +58,10 @@ async def _poll_package(package: dict[str, Any]) -> dict[str, Any] | None:
             if new_tracking_url:
                 result["tracking_url"] = new_tracking_url
 
+        # Clear error on successful scrape (even if no new events)
+        if not result.get("error"):
+            result["error"] = None
+
         # Check for changes
         old_fingerprint = package.get("last_event_fingerprint")
         new_fingerprint = result.get("last_event_fingerprint")

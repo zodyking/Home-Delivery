@@ -31,7 +31,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Code version for deployment verification
-CODE_VERSION = "0.0.10"
+CODE_VERSION = "0.0.11"
 
 app = FastAPI(title="Home Delivery API")
 
@@ -239,23 +239,45 @@ async def probe_carrier_endpoint(request: ProbeCarrierRequest):
 
 @app.post("/api/packages")
 async def add_package(pkg: PackageCreate):
-    """Add a new package to track."""
-    from carrier_detect import get_tracking_url, normalize_tracking_number
-    from carrier_probe import probe_carrier
-
-    # Auto-detect carrier if not provided using probe
-    carrier = pkg.carrier
-    if not carrier:
-        carrier = await probe_carrier(pkg.tracking_number)
-
-    if not carrier:
-        raise HTTPException(
-            status_code=400,
-            detail="Could not find this tracking number at USPS, UPS, or FedEx. Please verify the number.",
-        )
+    """Add a new package to track with immediate scrape."""
+    from carrier_detect import normalize_tracking_number
+    from carrier_probe import probe_carrier_result
+    from scrapers.tracking_fetch import fetch_carrier_tracking
 
     normalized = normalize_tracking_number(pkg.tracking_number)
 
+    # If carrier is provided, fetch tracking directly; otherwise auto-detect
+    if pkg.carrier:
+        carrier = pkg.carrier
+        from carrier_detect import get_tracking_url
+
+        # Scrape immediately to verify and get initial data
+        scrape_result = await fetch_carrier_tracking(carrier, normalized)
+        tracking_url = get_tracking_url(carrier, normalized)
+    else:
+        # Auto-detect carrier via scrape-first probe
+        probe_result = await probe_carrier_result(normalized)
+
+        if probe_result.get("error"):
+            raise HTTPException(
+                status_code=400,
+                detail=probe_result["error"],
+            )
+
+        carrier = probe_result["carrier"]
+        tracking_url = probe_result["tracking_url"]
+        scrape_result = {
+            "status": probe_result.get("status"),
+            "status_detail": probe_result.get("status_detail"),
+            "events": probe_result.get("events") or [],
+            "out_for_delivery": probe_result.get("out_for_delivery", False),
+            "delivered": probe_result.get("delivered", False),
+            "last_polled": probe_result.get("last_polled"),
+            "last_event_fingerprint": probe_result.get("last_event_fingerprint"),
+            "error": None,
+        }
+
+    # Build package with scraped data
     package = {
         "id": str(uuid.uuid4()),
         "tracking_number": normalized,
@@ -263,18 +285,18 @@ async def add_package(pkg: PackageCreate):
         "recipient": pkg.recipient.strip(),
         "destination": pkg.destination.strip(),
         "destination_account_id": pkg.destination_account_id,
-        "tracking_url": get_tracking_url(carrier, normalized),
-        "status": "Pending",
-        "status_detail": "",
-        "events": [],
-        "last_event_fingerprint": None,
-        "out_for_delivery": False,
-        "delivered": False,
+        "tracking_url": tracking_url,
+        "status": scrape_result.get("status") or "Pending",
+        "status_detail": scrape_result.get("status_detail") or "",
+        "events": scrape_result.get("events") or [],
+        "last_event_fingerprint": scrape_result.get("last_event_fingerprint"),
+        "out_for_delivery": scrape_result.get("out_for_delivery", False),
+        "delivered": scrape_result.get("delivered", False),
         "created_at": utc_now_iso(),
-        "last_polled": None,
+        "last_polled": scrape_result.get("last_polled") or utc_now_iso(),
         "next_poll_at": utc_now_iso(),
         "poll_interval_seconds": 3600,
-        "error": None,
+        "error": scrape_result.get("error"),
     }
 
     result = await config_store.add_package(package)

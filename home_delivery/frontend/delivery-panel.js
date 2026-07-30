@@ -2,7 +2,7 @@
  * Home Delivery Panel - Vanilla JS for HA custom panel / standalone Ingress
  * Design aligned with home-weather: topbar + gear settings, dashboard layout.
  */
-const PANEL_VERSION = "0.0.10";
+const PANEL_VERSION = "0.0.11";
 
 class HomeDeliveryPanel extends HTMLElement {
   constructor() {
@@ -1430,6 +1430,10 @@ class HomeDeliveryPanel extends HTMLElement {
   _renderPackageDetail() {
     const pkg = this._selectedPackage;
     if (!pkg) return "";
+
+    const lastPolled = pkg.last_polled ? this._formatRelativeTime(pkg.last_polled) : "Never";
+    const eventCount = pkg.events?.length || 0;
+
     return `
       <div class="modal-backdrop" data-action="close-detail">
         <div class="modal" onclick="event.stopPropagation()">
@@ -1442,6 +1446,12 @@ class HomeDeliveryPanel extends HTMLElement {
               <span class="detail-label">Status</span>
               <span class="detail-value status-${this._statusClass(pkg)}">${this._esc(pkg.status || "Pending")}</span>
             </div>
+            ${pkg.status_detail ? `
+              <div class="detail-row">
+                <span class="detail-label">Detail</span>
+                <span class="detail-value">${this._esc(pkg.status_detail)}</span>
+              </div>
+            ` : ""}
             ${pkg.recipient ? `
               <div class="detail-row">
                 <span class="detail-label">Recipient</span>
@@ -1454,7 +1464,17 @@ class HomeDeliveryPanel extends HTMLElement {
                 <span class="detail-value">${this._esc(pkg.destination)}</span>
               </div>
             ` : ""}
-            <h3 style="margin-top:20px">Tracking History</h3>
+            <div class="detail-row">
+              <span class="detail-label">Last Polled</span>
+              <span class="detail-value muted">${lastPolled}</span>
+            </div>
+            ${pkg.error ? `
+              <div class="detail-row detail-error">
+                <span class="detail-label">Error</span>
+                <span class="detail-value error-text">${this._esc(pkg.error)}</span>
+              </div>
+            ` : ""}
+            <h3 style="margin-top:20px">Tracking History <span class="muted">(${eventCount} events)</span></h3>
             ${pkg.events?.length > 0 ? `
               <div class="timeline">
                 ${pkg.events.map((e, i) => `
@@ -1469,10 +1489,36 @@ class HomeDeliveryPanel extends HTMLElement {
                 `).join("")}
               </div>
             ` : `<p class="muted">No tracking events yet</p>`}
+            ${pkg.tracking_url ? `
+              <div class="modal-footer">
+                <a href="${this._esc(pkg.tracking_url)}" target="_blank" rel="noopener" class="btn btn-sm">View on ${this._esc((pkg.carrier || "").toUpperCase())}</a>
+              </div>
+            ` : ""}
           </div>
         </div>
       </div>
     `;
+  }
+
+  _formatRelativeTime(isoString) {
+    if (!isoString) return "Unknown";
+    try {
+      const date = new Date(isoString);
+      const now = new Date();
+      const diffMs = now - date;
+      const diffSec = Math.floor(diffMs / 1000);
+      const diffMin = Math.floor(diffSec / 60);
+      const diffHr = Math.floor(diffMin / 60);
+      const diffDays = Math.floor(diffHr / 24);
+
+      if (diffSec < 60) return "Just now";
+      if (diffMin < 60) return `${diffMin}m ago`;
+      if (diffHr < 24) return `${diffHr}h ago`;
+      if (diffDays < 7) return `${diffDays}d ago`;
+      return date.toLocaleDateString();
+    } catch {
+      return isoString;
+    }
   }
 
   _renderSettingsContent() {
@@ -3477,6 +3523,26 @@ class HomeDeliveryPanel extends HTMLElement {
 
       .detail-value.status-out-for-delivery { color: var(--hd-warning); }
       .detail-value.status-delivered { color: var(--hd-success); }
+      .detail-value.status-error { color: var(--hd-danger); }
+
+      .detail-error {
+        background: rgba(239, 68, 68, 0.1);
+        border-radius: var(--radius-1);
+        padding: var(--space-2);
+        margin: var(--space-2) 0;
+      }
+
+      .error-text {
+        color: var(--hd-danger);
+        font-size: 12px;
+      }
+
+      .modal-footer {
+        margin-top: var(--space-4);
+        padding-top: var(--space-3);
+        border-top: 1px solid var(--hd-border);
+        text-align: center;
+      }
 
       /* ======================== Settings View ======================== */
 

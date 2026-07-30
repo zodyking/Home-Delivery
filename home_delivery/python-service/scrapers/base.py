@@ -96,9 +96,31 @@ async def get_page(timeout_ms: int = 30000) -> AsyncGenerator[Page, None]:
         page = await context.new_page()
         await page.add_init_script(
             """
+            // Hide webdriver flag
             Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
             Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
-            window.chrome = { runtime: {} };
+
+            // Mimic Chrome runtime
+            window.chrome = { runtime: {}, loadTimes: () => ({}) };
+
+            // Override permissions query to appear normal
+            const originalQuery = window.navigator.permissions?.query;
+            if (originalQuery) {
+                window.navigator.permissions.query = (parameters) => (
+                    parameters.name === 'notifications'
+                        ? Promise.resolve({ state: 'denied', onchange: null })
+                        : originalQuery(parameters)
+                );
+            }
+
+            // Hide automation-related properties
+            Object.defineProperty(navigator, 'plugins', {
+                get: () => [
+                    { name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer' },
+                    { name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai' },
+                    { name: 'Native Client', filename: 'internal-nacl-plugin' },
+                ],
+            });
             """
         )
         yield page

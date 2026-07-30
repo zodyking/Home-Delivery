@@ -7,7 +7,7 @@
 API_PORT="8000"
 
 bashio::log.info "============================================"
-bashio::log.info "HOME DELIVERY API SERVICE v0.0.10"
+bashio::log.info "HOME DELIVERY API SERVICE v0.0.11"
 bashio::log.info "============================================"
 bashio::log.info "API Port: ${API_PORT}"
 
