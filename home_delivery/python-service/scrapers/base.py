@@ -71,11 +71,15 @@ async def get_page(timeout_ms: int = 30000) -> AsyncGenerator[Page, None]:
     try:
         context = await browser.new_context(
             viewport={"width": 1280, "height": 800},
+            locale="en-US",
             user_agent=(
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) "
                 "Chrome/120.0.0.0 Safari/537.36"
             ),
+            extra_http_headers={
+                "Accept-Language": "en-US,en;q=0.9",
+            },
         )
         context.set_default_timeout(timeout_ms)
 

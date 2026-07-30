@@ -5,9 +5,10 @@ from __future__ import annotations
 
 import hashlib
 import logging
-import re
 from datetime import datetime, timezone
 from typing import Any
+
+from carrier_detect import get_tracking_url
 
 from .base import get_page
 
@@ -45,11 +46,11 @@ async def scrape_ups(tracking_number: str) -> dict[str, Any]:
     Returns:
         Dict with status, status_detail, events, out_for_delivery, delivered, etc.
     """
-    url = f"https://www.ups.com/track?tracknum={tracking_number}&loc=en_US&requester=ST"
+    url = get_tracking_url("ups", tracking_number)
     logger.info(f"Scraping UPS: {tracking_number}")
 
     async with get_page(timeout_ms=45000) as page:
-        await page.goto(url, wait_until="networkidle")
+        await page.goto(url, wait_until="domcontentloaded")
 
         # Wait for tracking content
         try:
@@ -58,12 +59,19 @@ async def scrape_ups(tracking_number: str) -> dict[str, Any]:
             logger.warning(f"UPS tracking content not found for {tracking_number}")
             return {"error": "Tracking content not found"}
 
-        # Try to expand details drawer if collapsed
+        # Expand full history via "Show Details"
         try:
-            drawer_buttons = page.locator("button:has-text('Show Details'), button:has-text('Details')")
-            if await drawer_buttons.count() > 0:
-                await drawer_buttons.first.click()
-                await page.wait_for_timeout(1000)
+            show_details = page.locator("app-show-details button, app-show-details")
+            if await show_details.count() > 0:
+                text = (await show_details.first.text_content() or "").strip().lower()
+                if "show details" in text:
+                    await show_details.first.click()
+                    await page.wait_for_timeout(1200)
+            else:
+                drawer_buttons = page.locator("button:has-text('Show Details')")
+                if await drawer_buttons.count() > 0:
+                    await drawer_buttons.first.click()
+                    await page.wait_for_timeout(1200)
         except Exception as e:
             logger.debug(f"Details drawer: {e}")
 

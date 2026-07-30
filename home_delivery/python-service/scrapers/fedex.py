@@ -9,6 +9,8 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
+from carrier_detect import get_tracking_url
+
 from .base import get_page
 
 logger = logging.getLogger(__name__)
@@ -49,11 +51,11 @@ async def scrape_fedex(tracking_number: str) -> dict[str, Any]:
     Returns:
         Dict with status, status_detail, events, out_for_delivery, delivered, etc.
     """
-    url = f"https://www.fedex.com/fedextrack/?trknbr={tracking_number}"
+    url = get_tracking_url("fedex", tracking_number)
     logger.info(f"Scraping FedEx: {tracking_number}")
 
     async with get_page(timeout_ms=60000) as page:
-        await page.goto(url, wait_until="networkidle")
+        await page.goto(url, wait_until="domcontentloaded")
 
         # FedEx SPA needs extra time for XHR render
         await page.wait_for_timeout(4000)

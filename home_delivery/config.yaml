@@ -1,6 +1,6 @@
 ---
 name: Home Delivery
-version: "0.0.3"
+version: "0.0.4"
 slug: home_delivery
 description: Track USPS, UPS & FedEx packages, Informed Delivery mail, and TTS alerts — all from one panel.
 url: https://github.com/zodyking/Home-Delivery

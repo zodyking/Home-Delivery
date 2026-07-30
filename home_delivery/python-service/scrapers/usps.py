@@ -5,9 +5,10 @@ from __future__ import annotations
 
 import hashlib
 import logging
-import re
 from datetime import datetime, timezone
 from typing import Any
+
+from carrier_detect import get_tracking_url
 
 from .base import get_page
 
@@ -45,11 +46,11 @@ async def scrape_usps(tracking_number: str) -> dict[str, Any]:
     Returns:
         Dict with status, status_detail, events, out_for_delivery, delivered, etc.
     """
-    url = f"https://tools.usps.com/tracking/{tracking_number}"
+    url = get_tracking_url("usps", tracking_number)
     logger.info(f"Scraping USPS: {tracking_number}")
 
     async with get_page() as page:
-        await page.goto(url, wait_until="networkidle")
+        await page.goto(url, wait_until="domcontentloaded")
 
         # Wait for tracking content to load
         try:
@@ -58,14 +59,14 @@ async def scrape_usps(tracking_number: str) -> dict[str, Any]:
             logger.warning(f"USPS tracking content not found for {tracking_number}")
             return {"error": "Tracking content not found"}
 
-        # Check for "Show Tracking History" button and click it
+        # Expand full history via "Show Tracking History"
         try:
             show_history = page.locator("a.expand-collapse-history")
             if await show_history.count() > 0:
-                text = await show_history.first.text_content()
-                if text and "show" in text.lower():
+                text = (await show_history.first.text_content() or "").strip().lower()
+                if "show tracking history" in text or text == "show":
                     await show_history.first.click()
-                    await page.wait_for_timeout(500)
+                    await page.wait_for_timeout(800)
         except Exception as e:
             logger.debug(f"History toggle: {e}")
 

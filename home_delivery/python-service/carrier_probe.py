@@ -1,233 +1,310 @@
 """
-Carrier probe detection using Playwright.
+Carrier detection by probing carrier tracking links in parallel.
 
-Instead of regex-based detection, this module probes carrier tracking pages
-to determine which carrier a tracking number belongs to by checking for
-valid DOM elements.
+No regex or format guessing — we hit each carrier URL and return the first
+that shows valid tracking content. HTTP checks run first for speed; Playwright
+is the fallback when pages need JavaScript.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
-from typing import Literal
 
-from carrier_detect import CarrierType, get_tracking_url, normalize_tracking_number
+import aiohttp
+
+from carrier_detect import (
+    CARRIERS,
+    CarrierType,
+    get_tracking_url,
+    normalize_tracking_number,
+)
 from scrapers.base import get_page
 
 logger = logging.getLogger(__name__)
 
-# Probe order: USPS is most common for e-commerce, then UPS, then FedEx
-PROBE_ORDER: list[CarrierType] = ["usps", "ups", "fedex"]
+HTTP_TIMEOUT_SEC = 8
+PROBE_TIMEOUT_MS = 12000
+PAGE_WAIT_MS = 1500
 
-# Timeout for probing (shorter than full scrape)
-PROBE_TIMEOUT_MS = 15000
-
-
-async def _probe_usps(page, tracking_number: str) -> bool:
-    """
-    Probe USPS tracking page to check if tracking number is valid.
-
-    Returns True if the tracking page shows valid tracking content.
-    """
-    url = get_tracking_url("usps", tracking_number)
-    logger.debug(f"Probing USPS: {url}")
-
-    try:
-        await page.goto(url, wait_until="domcontentloaded", timeout=PROBE_TIMEOUT_MS)
-        await page.wait_for_timeout(2000)
-
-        # Check for valid tracking indicators
-        valid_selectors = [
-            ".tb-status",
-            ".tracking-progress-bar-status-container",
-            ".tb-step.current-step",
-            "#trackingHistory",
-        ]
-
-        for selector in valid_selectors:
-            if await page.locator(selector).count() > 0:
-                # Verify it's not an error message
-                page_text = await page.locator("body").text_content() or ""
-                page_text_lower = page_text.lower()
-
-                invalid_indicators = [
-                    "not available",
-                    "cannot be found",
-                    "status not available",
-                    "no record",
-                    "enter a tracking number",
-                ]
-
-                if not any(ind in page_text_lower for ind in invalid_indicators):
-                    logger.info(f"USPS probe successful for {tracking_number}")
-                    return True
-
-        logger.debug(f"USPS probe failed for {tracking_number}: no valid content")
-        return False
-
-    except Exception as e:
-        logger.debug(f"USPS probe error for {tracking_number}: {e}")
-        return False
-
-
-async def _probe_ups(page, tracking_number: str) -> bool:
-    """
-    Probe UPS tracking page to check if tracking number is valid.
-
-    Returns True if the tracking page shows valid tracking content.
-    """
-    url = get_tracking_url("ups", tracking_number)
-    logger.debug(f"Probing UPS: {url}")
-
-    try:
-        await page.goto(url, wait_until="domcontentloaded", timeout=PROBE_TIMEOUT_MS)
-        await page.wait_for_timeout(3000)
-
-        # Check for valid tracking indicators
-        valid_selectors = [
-            "#shipProg_act_0",
-            ".ups-shipment-progress",
-            "[id^='shipProg_act_']",
-            ".track-results",
-        ]
-
-        for selector in valid_selectors:
-            if await page.locator(selector).count() > 0:
-                # Verify it's not an error message
-                page_text = await page.locator("body").text_content() or ""
-                page_text_lower = page_text.lower()
-
-                invalid_indicators = [
-                    "not found",
-                    "invalid tracking number",
-                    "we could not locate",
-                    "no information available",
-                    "unable to locate",
-                ]
-
-                if not any(ind in page_text_lower for ind in invalid_indicators):
-                    logger.info(f"UPS probe successful for {tracking_number}")
-                    return True
-
-        logger.debug(f"UPS probe failed for {tracking_number}: no valid content")
-        return False
-
-    except Exception as e:
-        logger.debug(f"UPS probe error for {tracking_number}: {e}")
-        return False
-
-
-async def _probe_fedex(page, tracking_number: str) -> bool:
-    """
-    Probe FedEx tracking page to check if tracking number is valid.
-
-    FedEx is a JS SPA and needs extra wait time.
-
-    Returns True if the tracking page shows valid tracking content.
-    """
-    url = get_tracking_url("fedex", tracking_number)
-    logger.debug(f"Probing FedEx: {url}")
-
-    try:
-        await page.goto(url, wait_until="domcontentloaded", timeout=PROBE_TIMEOUT_MS)
-        await page.wait_for_timeout(4000)
-
-        # Check for valid tracking indicators
-        valid_selectors = [
-            "[class*='shipment']",
-            "[class*='tracking-status']",
-            "[class*='shipmentStatus']",
-            "[class*='travel-history']",
-            "[class*='scan-event']",
-        ]
-
-        for selector in valid_selectors:
-            if await page.locator(selector).count() > 0:
-                # Verify it's not an error message
-                page_text = await page.locator("body").text_content() or ""
-                page_text_lower = page_text.lower()
-
-                invalid_indicators = [
-                    "not found",
-                    "invalid tracking number",
-                    "cannot locate",
-                    "no results",
-                    "unable to find",
-                    "please verify",
-                ]
-
-                if not any(ind in page_text_lower for ind in invalid_indicators):
-                    logger.info(f"FedEx probe successful for {tracking_number}")
-                    return True
-
-        logger.debug(f"FedEx probe failed for {tracking_number}: no valid content")
-        return False
-
-    except Exception as e:
-        logger.debug(f"FedEx probe error for {tracking_number}: {e}")
-        return False
-
-
-# Probe functions by carrier
-PROBE_FUNCTIONS = {
-    "usps": _probe_usps,
-    "ups": _probe_ups,
-    "fedex": _probe_fedex,
+HTTP_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/120.0.0.0 Safari/537.36"
+    ),
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
 }
+
+
+def _html_indicates_blocked(html: str) -> bool:
+    lower = html.lower()
+    return any(
+        phrase in lower
+        for phrase in (
+            "access denied",
+            "permission to access",
+            "errors.edgesuite.net",
+            "please enable javascript",
+        )
+    )
+
+
+def _html_has_tracking_status(html: str, tracking_number: str) -> bool:
+    lower = html.lower()
+    number = tracking_number.lower()
+
+    if number in lower:
+        return True
+
+    return any(
+        phrase in lower
+        for phrase in (
+            "out for delivery",
+            "delivered",
+            "in transit",
+            "pre-shipment",
+            "shipment ready",
+            "on the way",
+            "departed",
+            "arrived at",
+        )
+    )
+
+
+async def _probe_usps_http(session: aiohttp.ClientSession, tracking_number: str) -> bool:
+    url = get_tracking_url("usps", tracking_number)
+    try:
+        async with session.get(url, allow_redirects=True) as response:
+            if response.status >= 400:
+                return False
+            html = await response.text()
+            if _html_indicates_blocked(html):
+                return False
+            if "status not available" in html.lower() and "tb-status" not in html.lower():
+                return False
+            if "tb-status" in html.lower() or "tracking-progress-bar-status-container" in html.lower():
+                return _html_has_tracking_status(html, tracking_number)
+    except Exception as exc:
+        logger.debug("USPS HTTP probe error for %s: %s", tracking_number, exc)
+    return False
+
+
+async def _probe_ups_http(session: aiohttp.ClientSession, tracking_number: str) -> bool:
+    url = get_tracking_url("ups", tracking_number)
+    try:
+        async with session.get(url, allow_redirects=True) as response:
+            if response.status >= 400:
+                return False
+            html = await response.text()
+            if _html_indicates_blocked(html):
+                return False
+            lower = html.lower()
+            if "shipprog_act_date0" in lower or "ups-shipment-progress" in lower:
+                return _html_has_tracking_status(html, tracking_number)
+            if "invalid tracking number" in lower or "we could not locate" in lower:
+                return False
+    except Exception as exc:
+        logger.debug("UPS HTTP probe error for %s: %s", tracking_number, exc)
+    return False
+
+
+async def _probe_fedex_http(session: aiohttp.ClientSession, tracking_number: str) -> bool:
+    url = get_tracking_url("fedex", tracking_number)
+    try:
+        async with session.get(url, allow_redirects=True) as response:
+            if response.status >= 400:
+                return False
+            html = await response.text()
+            if _html_indicates_blocked(html):
+                return False
+            lower = html.lower()
+            if "no results found" in lower and tracking_number.lower() not in lower:
+                return False
+            if any(marker in lower for marker in ("shipmentstatus", "tracking-status", "travel-history")):
+                return _html_has_tracking_status(html, tracking_number)
+    except Exception as exc:
+        logger.debug("FedEx HTTP probe error for %s: %s", tracking_number, exc)
+    return False
+
+
+HTTP_PROBE_FUNCTIONS = {
+    "usps": _probe_usps_http,
+    "ups": _probe_ups_http,
+    "fedex": _probe_fedex_http,
+}
+
+
+async def _probe_usps_browser(page, tracking_number: str) -> bool:
+    url = get_tracking_url("usps", tracking_number)
+    logger.debug("Probing USPS link: %s", url)
+
+    try:
+        await page.goto(url, wait_until="domcontentloaded", timeout=PROBE_TIMEOUT_MS)
+        try:
+            await page.wait_for_selector(
+                ".tb-status, .tracking-progress-bar-status-container",
+                timeout=8000,
+            )
+        except Exception:
+            return False
+
+        status = page.locator(".tb-status").first
+        if await status.count() > 0:
+            text = (await status.text_content() or "").strip().lower()
+            if text and text not in {"status not available", "not available"}:
+                logger.info("USPS link matched for %s", tracking_number)
+                return True
+
+        if await page.locator(".tracking-progress-bar-status-container").count() > 0:
+            logger.info("USPS link matched for %s", tracking_number)
+            return True
+
+        return False
+    except Exception as exc:
+        logger.debug("USPS browser probe error for %s: %s", tracking_number, exc)
+        return False
+
+
+async def _probe_ups_browser(page, tracking_number: str) -> bool:
+    url = get_tracking_url("ups", tracking_number)
+    logger.debug("Probing UPS link: %s", url)
+
+    try:
+        await page.goto(url, wait_until="domcontentloaded", timeout=PROBE_TIMEOUT_MS)
+        try:
+            await page.wait_for_selector(
+                "[id^='shipProg_act_'], .ups-shipment-progress, .track-results",
+                timeout=8000,
+            )
+        except Exception:
+            return False
+
+        if await page.locator("#shipProg_act_Date0").count() > 0:
+            logger.info("UPS link matched for %s", tracking_number)
+            return True
+
+        if await page.locator(".ups-shipment-progress").count() > 0:
+            logger.info("UPS link matched for %s", tracking_number)
+            return True
+
+        return False
+    except Exception as exc:
+        logger.debug("UPS browser probe error for %s: %s", tracking_number, exc)
+        return False
+
+
+async def _probe_fedex_browser(page, tracking_number: str) -> bool:
+    url = get_tracking_url("fedex", tracking_number)
+    logger.debug("Probing FedEx link: %s", url)
+
+    try:
+        await page.goto(url, wait_until="domcontentloaded", timeout=PROBE_TIMEOUT_MS)
+        await page.wait_for_timeout(PAGE_WAIT_MS + 1000)
+        try:
+            await page.wait_for_selector(
+                "[class*='shipmentStatus'], [class*='tracking-status'], [class*='travel-history']",
+                timeout=8000,
+            )
+        except Exception:
+            return False
+
+        logger.info("FedEx link matched for %s", tracking_number)
+        return True
+    except Exception as exc:
+        logger.debug("FedEx browser probe error for %s: %s", tracking_number, exc)
+        return False
+
+
+BROWSER_PROBE_FUNCTIONS = {
+    "usps": _probe_usps_browser,
+    "ups": _probe_ups_browser,
+    "fedex": _probe_fedex_browser,
+}
+
+
+async def _race_carrier_tasks(tasks: dict[asyncio.Task, CarrierType]) -> CarrierType | None:
+    try:
+        for finished in asyncio.as_completed(tasks):
+            carrier = tasks[finished]
+            try:
+                matched = await finished
+            except asyncio.CancelledError:
+                continue
+            except Exception as exc:
+                logger.warning("Link probe task failed for %s: %s", carrier, exc)
+                continue
+
+            if matched:
+                return carrier
+    finally:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    return None
+
+
+async def _probe_via_http(tracking_number: str) -> CarrierType | None:
+    timeout = aiohttp.ClientTimeout(total=HTTP_TIMEOUT_SEC)
+    async with aiohttp.ClientSession(headers=HTTP_HEADERS, timeout=timeout) as session:
+        async def check(carrier: CarrierType) -> bool:
+            return await HTTP_PROBE_FUNCTIONS[carrier](session, tracking_number)
+
+        tasks = {
+            asyncio.create_task(check(carrier)): carrier
+            for carrier in CARRIERS
+        }
+        return await _race_carrier_tasks(tasks)
+
+
+async def _probe_via_browser(tracking_number: str) -> CarrierType | None:
+    async def check(carrier: CarrierType) -> bool:
+        probe_fn = BROWSER_PROBE_FUNCTIONS[carrier]
+        async with get_page(timeout_ms=PROBE_TIMEOUT_MS + 3000) as page:
+            return await probe_fn(page, tracking_number)
+
+    tasks = {
+        asyncio.create_task(check(carrier)): carrier
+        for carrier in CARRIERS
+    }
+    return await _race_carrier_tasks(tasks)
 
 
 async def probe_carrier(tracking_number: str) -> CarrierType | None:
     """
-    Probe carriers to detect which one a tracking number belongs to.
-
-    Attempts to load tracking pages for USPS, UPS, and FedEx in sequence,
-    returning early when a valid carrier is found.
-
-    Args:
-        tracking_number: The tracking number to probe.
-
-    Returns:
-        The carrier type ('usps', 'ups', or 'fedex') or None if not found.
+    Detect carrier by probing USPS, UPS, and FedEx tracking links.
+    HTTP probes run first; browser probes are the fallback.
     """
     normalized = normalize_tracking_number(tracking_number)
     if not normalized:
         logger.warning("Empty tracking number provided to probe_carrier")
         return None
 
-    logger.info(f"Probing carriers for tracking number: {normalized}")
+    logger.info("Probing carrier links for tracking number: %s", normalized)
 
-    # Try each carrier in order, using a fresh page for each
-    for carrier in PROBE_ORDER:
-        probe_fn = PROBE_FUNCTIONS[carrier]
+    carrier = await _probe_via_http(normalized)
+    if carrier:
+        logger.info("Carrier detected via HTTP link probe: %s for %s", carrier, normalized)
+        return carrier
 
-        try:
-            async with get_page(timeout_ms=PROBE_TIMEOUT_MS + 5000) as page:
-                if await probe_fn(page, normalized):
-                    logger.info(f"Carrier detected: {carrier} for {normalized}")
-                    return carrier
-        except Exception as e:
-            logger.warning(f"Probe failed for {carrier}/{normalized}: {e}")
-            continue
+    carrier = await _probe_via_browser(normalized)
+    if carrier:
+        logger.info("Carrier detected via browser link probe: %s for %s", carrier, normalized)
+        return carrier
 
-    logger.warning(f"No carrier found for tracking number: {normalized}")
+    logger.warning("No carrier link matched for tracking number: %s", normalized)
     return None
 
 
 async def probe_carrier_result(tracking_number: str) -> dict:
-    """
-    Probe carriers and return a result dict with carrier info and tracking URL.
-
-    Args:
-        tracking_number: The tracking number to probe.
-
-    Returns:
-        Dict with carrier, tracking_number, and tracking_url, or error.
-    """
+    """Probe carrier links and return carrier info plus tracking URL."""
     normalized = normalize_tracking_number(tracking_number)
     if not normalized:
         return {"error": "Invalid tracking number", "tracking_number": tracking_number}
 
     carrier = await probe_carrier(normalized)
-
     if not carrier:
         return {
             "error": "Could not find this tracking number at USPS, UPS, or FedEx",
