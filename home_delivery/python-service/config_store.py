@@ -32,7 +32,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "media_players": [],
     # Per announcement type → entity_id → { volume, bypass } (home-weather parity)
     "announcement_players": {},
-    "message_prefix": "Home Delivery update",
+    "message_prefix": "Message from Home Delivery",
     "tts": {
         "enabled": False,
         "enable_status_change": True,
@@ -142,6 +142,8 @@ def _migrate_config(config: dict) -> dict:
         config["_version"] = STORAGE_VERSION
     elif "mail" in config and not config["mail"].get("accounts"):
         config["mail"] = _migrate_mail_config(config.get("mail", {}))
+    if config.get("message_prefix") in ("Home Delivery update", "Home Delivery update."):
+        config["message_prefix"] = DEFAULT_CONFIG["message_prefix"]
     return config
 
 

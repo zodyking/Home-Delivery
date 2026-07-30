@@ -13,6 +13,13 @@ from tts_engine import dispatch_tts
 
 logger = logging.getLogger(__name__)
 
+_CARRIER_NAMES = {
+    "ups": "UPS",
+    "usps": "USPS",
+    "fedex": "FedEx",
+    "estes": "Estes Express",
+}
+
 
 def _parse_time(t: str) -> time | None:
     """Parse HH:MM time string."""
@@ -66,44 +73,138 @@ async def _should_announce(event_type: str) -> bool:
     return True
 
 
+def _format_carrier(carrier: str | None) -> str:
+    key = (carrier or "").strip().lower()
+    if key in _CARRIER_NAMES:
+        return _CARRIER_NAMES[key]
+    if carrier and carrier.strip():
+        return carrier.strip().title()
+    return "carrier"
+
+
+def _format_status(status: str | None) -> str:
+    text = (status or "updated").strip()
+    return text.lower() if text else "updated"
+
+
+def _package_phrase(
+    carrier: str | None,
+    recipient: str | None,
+    destination: str | None,
+) -> str:
+    """Natural mid-sentence phrase, e.g. 'the UPS package for Mom'."""
+    name = _format_carrier(carrier)
+    recipient = (recipient or "").strip()
+    destination = (destination or "").strip()
+
+    if recipient and destination:
+        return f"the {name} package for {recipient}, going to {destination}"
+    if recipient:
+        return f"the {name} package for {recipient}"
+    if destination:
+        return f"the {name} package going to {destination}"
+    return f"your {name} package"
+
+
 def _build_package_message(
     package: dict[str, Any],
     status_changed: bool = False,
     newly_ofd: bool = False,
     newly_delivered: bool = False,
 ) -> str:
-    """Build TTS message for package status."""
-    recipient = package.get("recipient")
-    destination = package.get("destination")
-    status = package.get("status", "")
-    carrier = (package.get("carrier") or "").upper()
-
-    context = ""
-    if recipient and destination:
-        context = f" for {recipient} going to {destination}"
-    elif recipient:
-        context = f" for {recipient}"
-    elif destination:
-        context = f" going to {destination}"
+    """Build a short, conversational TTS message for package status."""
+    phrase = _package_phrase(
+        package.get("carrier"),
+        package.get("recipient"),
+        package.get("destination"),
+    )
 
     if newly_delivered:
-        return f"Great news! Your {carrier} package{context} has been delivered."
+        return f"{phrase} has been delivered."
 
     if newly_ofd:
-        return f"Heads up! Your {carrier} package{context} is out for delivery."
+        return f"{phrase} is out for delivery."
 
     if status_changed:
+        status = _format_status(package.get("status"))
         events = package.get("events", [])
         location = ""
         if events:
-            location = events[0].get("location", "")
+            location = (events[0].get("location") or "").strip()
 
-        msg = f"Package update: Your {carrier} package{context} status is now {status}."
+        msg = f"{phrase} is now {status}."
         if location:
-            msg += f" Last seen in {location}."
+            msg += f" It was last seen in {location}."
         return msg
 
-    return f"Package status: {status}"
+    return f"{phrase} is {_format_status(package.get('status'))}."
+
+
+def _account_label(account: dict[str, Any]) -> str:
+    """Human-readable address name for TTS."""
+    label = (account.get("label") or "").strip()
+    if label:
+        return label
+    user = (account.get("imap_user") or "").strip()
+    if user:
+        return user.split("@")[0]
+    return "this address"
+
+
+def _count_phrase(count: int, *, kind: str) -> str:
+    """Speakable count for mail pieces or expected packages."""
+    if count <= 0:
+        return "no mail" if kind == "mail" else "no packages"
+    if count == 1:
+        return "one piece of mail" if kind == "mail" else "one package"
+    if kind == "mail":
+        return f"{count} pieces of mail"
+    return f"{count} packages"
+
+
+def build_mail_tts_message(accounts: list[dict[str, Any]]) -> str:
+    """
+    Build a per-address daily mail summary.
+
+    Each enabled account is announced with separate mail and package counts.
+    Explicitly states when an address has none expected today.
+    """
+    enabled = [a for a in accounts if a.get("enabled", True)]
+    if not enabled:
+        return "no mail accounts are configured."
+
+    lines: list[str] = []
+    for account in enabled:
+        name = _account_label(account)
+        mailpieces = int(account.get("mailpiece_count") or 0)
+        packages = int(account.get("package_count") or 0)
+
+        if mailpieces == 0 and packages == 0:
+            lines.append(f"for {name}, there is no mail and no packages expected today")
+            continue
+
+        mail_part = _count_phrase(mailpieces, kind="mail")
+        package_part = _count_phrase(packages, kind="package")
+        lines.append(f"for {name}, {mail_part} and {package_part} expected today")
+
+    if not lines:
+        return "there is no mail and no packages expected today."
+
+    if len(lines) == 1:
+        return f"{lines[0]}."
+    return f"{'. '.join(lines)}."
+
+
+async def trigger_mail_tts(accounts: list[dict[str, Any]]) -> None:
+    """Trigger TTS announcement with mail and package counts per address."""
+    if not await _should_announce("mail_arrived"):
+        logger.debug("TTS skipped for mail_arrived")
+        return
+
+    message = build_mail_tts_message(accounts)
+    logger.info(f"Sending mail TTS: {message}")
+    config = await config_store.load()
+    await dispatch_tts(config, message, "mail_arrived")
 
 
 async def trigger_package_tts(
@@ -135,18 +236,3 @@ async def trigger_package_tts(
     config = await config_store.load()
     await dispatch_tts(config, message, event_type)
 
-
-async def trigger_mail_tts(piece_count: int) -> None:
-    """Trigger TTS announcement for mail arrival."""
-    if not await _should_announce("mail_arrived"):
-        logger.debug("TTS skipped for mail_arrived")
-        return
-
-    if piece_count == 1:
-        message = "You have 1 piece of mail arriving today."
-    else:
-        message = f"You have {piece_count} pieces of mail arriving today."
-
-    logger.info(f"Sending mail TTS: {message}")
-    config = await config_store.load()
-    await dispatch_tts(config, message, "mail_arrived")

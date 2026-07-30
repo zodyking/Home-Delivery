@@ -31,7 +31,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Code version for deployment verification
-CODE_VERSION = "0.0.14"
+CODE_VERSION = "0.0.15"
 
 app = FastAPI(title="Home Delivery API")
 
@@ -114,7 +114,7 @@ class ConfigUpdate(BaseModel):
 
 
 class TTSTestRequest(BaseModel):
-    message: str = "This is a Home Delivery test announcement."
+    message: str = "the UPS package for Mom is out for delivery."
     media_player: str | None = None
     type_id: str | None = None
 
@@ -433,6 +433,20 @@ async def get_mail():
             for a in mail_state.get("accounts", [])
         ],
     }
+
+
+@app.get("/api/address/autocomplete")
+async def address_autocomplete(q: str = "", limit: int = 8):
+    """Street address suggestions (house + street only, no city/state/ZIP)."""
+    from address_autocomplete import search_street_addresses
+
+    cleaned = (q or "").strip()
+    if len(cleaned) < 3:
+        return {"suggestions": []}
+
+    safe_limit = max(1, min(int(limit or 8), 10))
+    suggestions = await search_street_addresses(cleaned, limit=safe_limit)
+    return {"suggestions": suggestions}
 
 
 async def _resolve_imap_password(

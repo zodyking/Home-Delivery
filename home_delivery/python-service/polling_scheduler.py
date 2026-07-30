@@ -237,8 +237,14 @@ async def _poll_mail() -> None:
     try:
         from mail.informed_delivery import check_informed_delivery
 
-        old_total = sum(int(a.get("piece_count") or 0) for a in enabled)
-        new_total = 0
+        old_by_id = {
+            a["id"]: {
+                "mailpiece_count": int(a.get("mailpiece_count") or 0),
+                "package_count": int(a.get("package_count") or 0),
+            }
+            for a in enabled
+            if a.get("id")
+        }
 
         for account in enabled:
             if not all([account.get("imap_host"), account.get("imap_user"), account.get("imap_password")]):
@@ -246,7 +252,6 @@ async def _poll_mail() -> None:
             try:
                 result = await check_informed_delivery(account)
                 piece_count = result.get("piece_count", 0)
-                new_total += piece_count
                 await config_store.update_mail_state(
                     account_id=account["id"],
                     piece_count=piece_count,
@@ -298,8 +303,19 @@ async def _poll_mail() -> None:
                     last_error=str(e),
                 )
 
-        if new_total > old_total:
-            await trigger_mail_tts(new_total)
+        config = await config_store.load()
+        updated_accounts = [
+            a for a in config.get("mail", {}).get("accounts", [])
+            if a.get("enabled", True)
+        ]
+        mail_changed = any(
+            int(a.get("mailpiece_count") or 0) != old_by_id.get(a.get("id"), {}).get("mailpiece_count", -1)
+            or int(a.get("package_count") or 0) != old_by_id.get(a.get("id"), {}).get("package_count", -1)
+            for a in updated_accounts
+            if a.get("id")
+        )
+        if mail_changed:
+            await trigger_mail_tts(updated_accounts)
 
     except Exception as e:
         logger.error(f"Mail check failed: {e}")

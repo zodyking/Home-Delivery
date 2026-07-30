@@ -2,7 +2,7 @@
  * Home Delivery Panel - Vanilla JS for HA custom panel / standalone Ingress
  * Design aligned with home-weather: topbar + gear settings, dashboard layout.
  */
-const PANEL_VERSION = "0.0.14";
+const PANEL_VERSION = "0.0.15";
 
 class HomeDeliveryPanel extends HTMLElement {
   constructor() {
@@ -310,7 +310,7 @@ class HomeDeliveryPanel extends HTMLElement {
         this._settings.announcement_players = {};
       }
       if (typeof this._settings.message_prefix !== "string") {
-        this._settings.message_prefix = "Home Delivery update";
+        this._settings.message_prefix = "Message from Home Delivery";
       }
       this._packages = packagesResp.packages || [];
       this._mailState = mailResp;
@@ -667,7 +667,7 @@ class HomeDeliveryPanel extends HTMLElement {
 
     const messagePrefix = s.querySelector("#message-prefix");
     if (messagePrefix) {
-      this._settings.message_prefix = messagePrefix.value || "Home Delivery update";
+      this._settings.message_prefix = messagePrefix.value || "Message from Home Delivery";
     }
 
     const cards = s.querySelectorAll("#media-player-list .media-player-card");
@@ -2235,7 +2235,7 @@ class HomeDeliveryPanel extends HTMLElement {
   _renderAnnouncementsPane(activePane) {
     const tts = this._settings.tts || {};
     const mediaPlayers = this._settings.media_players || [];
-    const messagePrefix = this._settings.message_prefix || "Home Delivery update";
+    const messagePrefix = this._settings.message_prefix || "Message from Home Delivery";
     const configuredIds = new Set(mediaPlayers.map((m) => m.entity_id).filter(Boolean));
     const availableMediaPlayers = (this._mediaPlayers || []).filter((e) => !configuredIds.has(e));
 
@@ -2272,8 +2272,8 @@ class HomeDeliveryPanel extends HTMLElement {
         ${this._renderCollapsibleSection("general", "Message Intro", "Opening phrase spoken before updates", `
           <div class="form-group">
             <label for="message-prefix">Intro Message</label>
-            <input type="text" id="message-prefix" placeholder="Home Delivery update" value="${this._escapeAttr(messagePrefix)}" />
-            <p class="hint">Spoken before each announcement message.</p>
+            <input type="text" id="message-prefix" placeholder="Message from Home Delivery" value="${this._escapeAttr(messagePrefix)}" />
+            <p class="hint">Spoken before each announcement, followed by a comma.</p>
           </div>
         `)}
 
@@ -2297,7 +2297,7 @@ class HomeDeliveryPanel extends HTMLElement {
           "Speak when package status updates",
           "tts-status-change",
           tts.enable_status_change !== false,
-          "Package update: Your package status has changed.",
+          "the UPS package for Mom is now in transit.",
         )}
         ${this._renderMessageTypeSection(
           "out_for_delivery",
@@ -2305,7 +2305,7 @@ class HomeDeliveryPanel extends HTMLElement {
           "Speak when a package is out for delivery",
           "tts-out-for-delivery",
           tts.enable_out_for_delivery !== false,
-          "Heads up! Your package is out for delivery.",
+          "the UPS package for Mom is out for delivery.",
         )}
         ${this._renderMessageTypeSection(
           "delivered",
@@ -2313,7 +2313,7 @@ class HomeDeliveryPanel extends HTMLElement {
           "Speak when a package is delivered",
           "tts-delivered",
           tts.enable_delivered !== false,
-          "Great news! Your package has been delivered.",
+          "the UPS package for Mom has been delivered.",
         )}
         ${this._renderMessageTypeSection(
           "mail_arrived",
@@ -2321,7 +2321,7 @@ class HomeDeliveryPanel extends HTMLElement {
           "Speak when Informed Delivery mail arrives",
           "tts-mail-arrived",
           tts.enable_mail_arrived !== false,
-          "You have mail arriving today.",
+          "for Home, 3 pieces of mail and one package expected today. for Office, no mail and no packages expected today.",
         )}
       </section>
     `;
@@ -2594,11 +2594,16 @@ class HomeDeliveryPanel extends HTMLElement {
       <div class="wizard-step-content">
         <div class="form-group">
           <label for="mail-label">Mail for</label>
-          <input type="text" id="mail-label" required
-            value="${this._esc(modal.label || "")}"
-            placeholder="e.g., Home, Mom, Office"
-            ${submitting ? "disabled" : ""} />
-          <p class="hint">Who this mail is for — used in announcements and package destinations</p>
+          <div class="address-autocomplete-wrapper">
+            <input type="text" id="mail-label" class="address-autocomplete-input" required
+              value="${this._esc(modal.label || "")}"
+              placeholder="Start typing a street address…"
+              autocomplete="off"
+              spellcheck="false"
+              ${submitting ? "disabled" : ""} />
+            <div class="address-autocomplete-dropdown" hidden></div>
+          </div>
+          <p class="hint">Street address only — suggestions appear as you type. City, state, and ZIP are not saved.</p>
         </div>
         <div class="wizard-summary">
           <div class="wizard-summary-row">
@@ -2900,6 +2905,123 @@ class HomeDeliveryPanel extends HTMLElement {
     });
 
     this._initMailCarousels();
+    this._attachMailAddressAutocomplete();
+  }
+
+  _attachMailAddressAutocomplete() {
+    const s = this.shadowRoot;
+    if (!s) return;
+
+    const input = s.querySelector("#mail-label");
+    if (!input || input.dataset.autocompleteBound === "1") return;
+    input.dataset.autocompleteBound = "1";
+
+    const wrapper = input.closest(".address-autocomplete-wrapper");
+    const dropdown = wrapper?.querySelector(".address-autocomplete-dropdown");
+    if (!wrapper || !dropdown) return;
+
+    let activeIndex = -1;
+    let suggestions = [];
+    let debounceTimer = null;
+    let abortController = null;
+
+    const closeDropdown = () => {
+      dropdown.hidden = true;
+      activeIndex = -1;
+      suggestions = [];
+      dropdown.innerHTML = "";
+    };
+
+    const selectSuggestion = (street) => {
+      input.value = street;
+      if (this._mailAccountModal) {
+        this._mailAccountModal.label = street;
+      }
+      closeDropdown();
+    };
+
+    const renderDropdown = () => {
+      if (!suggestions.length) {
+        closeDropdown();
+        return;
+      }
+      dropdown.innerHTML = suggestions.map((item, index) => `
+        <button type="button"
+                class="address-autocomplete-option ${index === activeIndex ? "active" : ""}"
+                data-index="${index}">
+          ${this._esc(item.street_address)}
+        </button>
+      `).join("");
+      dropdown.hidden = false;
+
+      dropdown.querySelectorAll(".address-autocomplete-option").forEach((btn) => {
+        btn.addEventListener("mousedown", (e) => {
+          e.preventDefault();
+          const index = parseInt(btn.dataset.index, 10);
+          if (Number.isFinite(index) && suggestions[index]) {
+            selectSuggestion(suggestions[index].street_address);
+          }
+        });
+      });
+    };
+
+    const fetchSuggestions = async (query) => {
+      if (abortController) abortController.abort();
+      abortController = new AbortController();
+
+      try {
+        const base = this._getApiBase();
+        const url = `${base}/api/address/autocomplete?q=${encodeURIComponent(query)}&limit=8`;
+        const resp = await fetch(url, { signal: abortController.signal });
+        if (!resp.ok) {
+          closeDropdown();
+          return;
+        }
+        const data = await resp.json();
+        suggestions = data.suggestions || [];
+        activeIndex = -1;
+        renderDropdown();
+      } catch (err) {
+        if (err?.name !== "AbortError") {
+          closeDropdown();
+        }
+      }
+    };
+
+    input.addEventListener("input", () => {
+      const query = input.value.trim();
+      if (this._mailAccountModal) {
+        this._mailAccountModal.label = query;
+      }
+      if (debounceTimer) clearTimeout(debounceTimer);
+      if (query.length < 3) {
+        closeDropdown();
+        return;
+      }
+      debounceTimer = setTimeout(() => fetchSuggestions(query), 300);
+    });
+
+    input.addEventListener("keydown", (e) => {
+      if (dropdown.hidden || !suggestions.length) return;
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        activeIndex = Math.min(activeIndex + 1, suggestions.length - 1);
+        renderDropdown();
+      } else if (e.key === "ArrowUp") {
+        e.preventDefault();
+        activeIndex = Math.max(activeIndex - 1, 0);
+        renderDropdown();
+      } else if (e.key === "Enter" && activeIndex >= 0) {
+        e.preventDefault();
+        selectSuggestion(suggestions[activeIndex].street_address);
+      } else if (e.key === "Escape") {
+        closeDropdown();
+      }
+    });
+
+    input.addEventListener("blur", () => {
+      setTimeout(closeDropdown, 150);
+    });
   }
 
   _attachSettingsHandlers() {
@@ -3020,7 +3142,7 @@ class HomeDeliveryPanel extends HTMLElement {
           await this._fetchApi("/api/test-tts", {
             method: "POST",
             body: JSON.stringify({
-              message: "This is a Home Delivery test announcement.",
+              message: "the UPS package for Mom is out for delivery.",
               media_player: mp.entity_id,
             }),
           });
@@ -3042,7 +3164,7 @@ class HomeDeliveryPanel extends HTMLElement {
           await this._fetchApi("/api/test-tts", {
             method: "POST",
             body: JSON.stringify({
-              message: btn.dataset.testMessage || "This is a Home Delivery test announcement.",
+              message: btn.dataset.testMessage || "the UPS package for Mom is out for delivery.",
               type_id: btn.dataset.testType,
             }),
           });
@@ -5093,6 +5215,50 @@ class HomeDeliveryPanel extends HTMLElement {
 
       .modal-body {
         padding: var(--space-4);
+      }
+
+      .address-autocomplete-wrapper {
+        position: relative;
+        width: 100%;
+      }
+
+      .address-autocomplete-input {
+        width: 100%;
+      }
+
+      .address-autocomplete-dropdown {
+        position: absolute;
+        top: calc(100% + 4px);
+        left: 0;
+        right: 0;
+        z-index: 40;
+        max-height: 240px;
+        overflow-y: auto;
+        background: var(--hd-surface);
+        border: 1px solid var(--hd-border);
+        border-radius: var(--radius-sm);
+        box-shadow: var(--shadow-md);
+      }
+
+      .address-autocomplete-option {
+        display: block;
+        width: 100%;
+        padding: 10px 12px;
+        border: none;
+        background: transparent;
+        color: var(--hd-text);
+        font-size: 14px;
+        text-align: left;
+        cursor: pointer;
+      }
+
+      .address-autocomplete-option:hover,
+      .address-autocomplete-option.active {
+        background: color-mix(in srgb, var(--hd-accent) 12%, transparent);
+      }
+
+      .address-autocomplete-option + .address-autocomplete-option {
+        border-top: 1px solid var(--hd-border);
       }
 
       /* ======================== Timeline ======================== */

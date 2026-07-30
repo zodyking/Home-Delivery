@@ -152,17 +152,16 @@ def resolve_announcement_players(
 
 
 def apply_message_prefix(config: dict[str, Any], message: str) -> str:
-    """Prepend configured intro message when present."""
-    prefix = (config.get("message_prefix") or "").strip()
+    """Prepend configured intro message when present (comma join for natural speech)."""
+    prefix = (config.get("message_prefix") or "").strip().rstrip(",.")
     body = (message or "").strip()
     if not body:
         return ""
     if not prefix:
         return body
-    # Avoid double-prefix if body already starts with it
     if body.lower().startswith(prefix.lower()):
         return body
-    return f"{prefix}. {body}"
+    return f"{prefix}, {body}"
 
 
 async def send_tts(
