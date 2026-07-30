@@ -16,6 +16,7 @@ from carrier_detect import (
     CARRIERS,
     CarrierType,
     get_tracking_url,
+    infer_carrier_from_format,
     normalize_tracking_number,
 )
 from scrapers.base import get_page
@@ -34,6 +35,11 @@ HTTP_HEADERS = {
     ),
     "Accept-Language": "en-US,en;q=0.9",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1",
+    "Upgrade-Insecure-Requests": "1",
 }
 
 
@@ -46,6 +52,9 @@ def _html_indicates_blocked(html: str) -> bool:
             "permission to access",
             "errors.edgesuite.net",
             "please enable javascript",
+            "bm-verify",
+            "interstitialchallenge",
+            "/_sec/verify",
         )
     )
 
@@ -282,27 +291,47 @@ async def _probe_via_browser(tracking_number: str) -> CarrierType | None:
 async def probe_carrier(tracking_number: str) -> CarrierType | None:
     """
     Detect carrier by probing USPS, UPS, and FedEx tracking links.
-    HTTP probes run first; browser probes are the fallback.
+    HTTP probes run first; browser probes are the fallback; format inference is last resort.
+    """
+    carrier, _method = await probe_carrier_with_method(tracking_number)
+    return carrier
+
+
+async def probe_carrier_with_method(tracking_number: str) -> tuple[CarrierType | None, str]:
+    """
+    Detect carrier and return how it was detected.
+
+    Returns:
+        (carrier, method) where method is link_probe, format_inference, or empty string.
     """
     normalized = normalize_tracking_number(tracking_number)
     if not normalized:
         logger.warning("Empty tracking number provided to probe_carrier")
-        return None
+        return None, ""
 
     logger.info("Probing carrier links for tracking number: %s", normalized)
 
     carrier = await _probe_via_http(normalized)
     if carrier:
         logger.info("Carrier detected via HTTP link probe: %s for %s", carrier, normalized)
-        return carrier
+        return carrier, "link_probe"
+
+    carrier = infer_carrier_from_format(normalized)
+    if carrier:
+        logger.warning(
+            "Link probing blocked or inconclusive for %s; using format inference: %s",
+            normalized,
+            carrier,
+        )
+        return carrier, "format_inference"
 
     carrier = await _probe_via_browser(normalized)
     if carrier:
         logger.info("Carrier detected via browser link probe: %s for %s", carrier, normalized)
-        return carrier
+        return carrier, "link_probe"
 
     logger.warning("No carrier link matched for tracking number: %s", normalized)
-    return None
+    return None, ""
 
 
 async def probe_carrier_result(tracking_number: str) -> dict:
@@ -311,10 +340,10 @@ async def probe_carrier_result(tracking_number: str) -> dict:
     if not normalized:
         return {"error": "Invalid tracking number", "tracking_number": tracking_number}
 
-    carrier = await probe_carrier(normalized)
+    carrier, detected_via = await probe_carrier_with_method(normalized)
     if not carrier:
         return {
-            "error": "Could not find this tracking number at USPS, UPS, or FedEx",
+            "error": "Could not determine carrier for this tracking number",
             "tracking_number": normalized,
         }
 
@@ -322,4 +351,5 @@ async def probe_carrier_result(tracking_number: str) -> dict:
         "carrier": carrier,
         "tracking_number": normalized,
         "tracking_url": get_tracking_url(carrier, normalized),
+        "detected_via": detected_via,
     }

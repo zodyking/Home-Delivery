@@ -40,3 +40,38 @@ def get_all_tracking_urls(tracking_number: str) -> dict[CarrierType, str]:
     """Return every carrier tracking URL for a number (used during probing)."""
     cleaned = normalize_tracking_number(tracking_number)
     return {carrier: url.format(tracking_number=cleaned) for carrier, url in TRACKING_URLS.items()}
+
+
+def infer_carrier_from_format(tracking_number: str) -> CarrierType | None:
+    """
+    Infer carrier from tracking-number shape when link probing is blocked.
+
+    Used only as a last resort after HTTP and browser probes fail (e.g. Akamai).
+    """
+    cleaned = normalize_tracking_number(tracking_number)
+    if not cleaned:
+        return None
+
+    # UPS: 1Z + 16 alphanumeric (very reliable).
+    if re.fullmatch(r"1Z[A-Z0-9]{16}", cleaned):
+        return "ups"
+
+    # FedEx: common numeric lengths.
+    if re.fullmatch(r"\d{12}", cleaned) or re.fullmatch(r"\d{15}", cleaned):
+        return "fedex"
+
+    # USPS: 20–34 digit Intelligent Mail / IMpb barcodes (Informed Delivery scans).
+    if re.fullmatch(r"\d{20,34}", cleaned):
+        return "usps"
+
+    # USPS: Priority / Certified / other letter+suffixed formats.
+    if re.fullmatch(r"[A-Z]{2}\d{9}US", cleaned):
+        return "usps"
+    if re.fullmatch(r"\d{4}\s?\d{4}\s?\d{4}\s?\d{4}\s?\d{4}\s?\d{2}", cleaned.replace(" ", "")):
+        return "usps"
+
+    # Generic alphanumeric blocks often used by USPS (e.g. 9400… style without strict length).
+    if re.fullmatch(r"\d{13,34}", cleaned) and cleaned.startswith(("9", "8", "7")):
+        return "usps"
+
+    return None

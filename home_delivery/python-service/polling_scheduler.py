@@ -174,6 +174,7 @@ async def _poll_mail() -> None:
                     account_id=account["id"],
                     piece_count=piece_count,
                     gif_filename=result.get("gif_filename"),
+                    preview_images=result.get("preview_images") or [],
                     last_error=None,
                 )
             except Exception as e:
@@ -182,6 +183,7 @@ async def _poll_mail() -> None:
                     account_id=account["id"],
                     piece_count=account.get("piece_count", 0),
                     gif_filename=account.get("gif_filename"),
+                    preview_images=account.get("preview_images") or [],
                     last_error=str(e),
                 )
 

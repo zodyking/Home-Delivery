@@ -4,10 +4,10 @@ Ported from Mail-And-Packages integration.
 """
 from __future__ import annotations
 
+import base64
 import email
 import imaplib
 import logging
-import os
 import re
 import uuid
 from datetime import datetime, timezone
@@ -63,6 +63,22 @@ def _build_search_query(senders: list[str], subject: str, since_date: str) -> st
     return f'({from_clause} SUBJECT "{subject}" SINCE {since_date})'
 
 
+# Minimum payload size — skip tracking pixels and tiny icons.
+MIN_IMAGE_BYTES = 4096
+
+
+def _delete_mail_files(filenames: list[str] | None) -> None:
+    """Remove previously saved mail preview files."""
+    for name in filenames or []:
+        if not name:
+            continue
+        path = MAIL_IMAGES_DIR / Path(name).name
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as exc:
+            logger.debug("Could not delete mail image %s: %s", name, exc)
+
+
 def _is_valid_mail_image(filename: str) -> bool:
     """Check if filename is likely a mail piece image."""
     if not filename:
@@ -82,30 +98,61 @@ def _is_valid_mail_image(filename: str) -> bool:
     return True
 
 
+def _append_unique_image(images: list[bytes], seen: set[int], payload: bytes | None) -> None:
+    """Append decoded image bytes once (dedupe by size + leading bytes)."""
+    if not payload or len(payload) < MIN_IMAGE_BYTES:
+        return
+    fingerprint = hash(payload[:512])
+    if fingerprint in seen:
+        return
+    seen.add(fingerprint)
+    images.append(payload)
+
+
+def _extract_images_from_html(msg: Message, images: list[bytes], seen: set[int]) -> None:
+    """Pull embedded base64 images from the HTML body."""
+    for part in msg.walk():
+        if part.get_content_type() != "text/html":
+            continue
+        raw = part.get_payload(decode=True)
+        if not raw:
+            continue
+        text = raw.decode("utf-8", errors="ignore")
+        for match in re.finditer(
+            r"data:image/(?:jpeg|jpg|png);base64,([A-Za-z0-9+/=\s]+)",
+            text,
+            flags=re.IGNORECASE,
+        ):
+            blob = match.group(1).replace("\n", "").replace("\r", "")
+            try:
+                _append_unique_image(images, seen, base64.b64decode(blob, validate=False))
+            except Exception:
+                continue
+
+
 def _extract_images_from_message(msg: Message) -> list[bytes]:
-    """Extract mail piece images from email message."""
+    """Extract mail piece images from email MIME parts and HTML embeds."""
     images: list[bytes] = []
+    seen: set[int] = set()
 
     for part in msg.walk():
         content_type = part.get_content_type()
-        content_disposition = str(part.get("Content-Disposition", ""))
-
-        # Skip non-attachment parts
-        if "attachment" not in content_disposition and "inline" not in content_disposition:
-            continue
-
-        # Only process images
         if not content_type.startswith("image/"):
             continue
 
+        content_disposition = str(part.get("Content-Disposition", ""))
         filename = part.get_filename() or ""
-        if not _is_valid_mail_image(filename):
+
+        # Skip obvious branding assets when a filename is present.
+        if filename and not _is_valid_mail_image(filename):
             continue
 
-        payload = part.get_payload(decode=True)
-        if payload:
-            images.append(payload)
+        # Prefer attachments and inline scans; unnamed inline parts are often mail pieces.
+        if filename or "inline" in content_disposition.lower() or "attachment" in content_disposition.lower():
+            payload = part.get_payload(decode=True)
+            _append_unique_image(images, seen, payload)
 
+    _extract_images_from_html(msg, images, seen)
     return images
 
 
@@ -320,7 +367,7 @@ async def check_informed_delivery(mail_config: dict[str, Any]) -> dict[str, Any]
 
         if not data or not data[0]:
             logger.info("No Informed Delivery email found for today")
-            return {"piece_count": 0, "gif_filename": None}
+            return {"piece_count": 0, "gif_filename": None, "preview_images": []}
 
         # Get the latest matching email
         email_ids = data[0].split()
@@ -329,7 +376,7 @@ async def check_informed_delivery(mail_config: dict[str, Any]) -> dict[str, Any]
         status, msg_data = imap.fetch(latest_id, "(RFC822)")
         if status != "OK" or not msg_data[0]:
             logger.warning("Failed to fetch email")
-            return {"piece_count": 0, "gif_filename": None}
+            return {"piece_count": 0, "gif_filename": None, "preview_images": []}
 
         raw_email = msg_data[0][1]
         msg = email.message_from_bytes(raw_email)
@@ -343,14 +390,19 @@ async def check_informed_delivery(mail_config: dict[str, Any]) -> dict[str, Any]
             images.append(b"")  # Empty placeholder
 
         piece_count = len(images)
-        logger.info(f"Found {piece_count} mail pieces")
+        logger.info("Found %s mail pieces (%s with image data)", piece_count, sum(1 for img in images if img))
 
-        # Generate GIF if we have images
-        gif_filename = None
-        if images and any(img for img in images):
-            gif_filename = await _generate_mail_gif(images)
+        preview_images, gif_filename = await _save_mail_previews(
+            mail_config.get("id", "mail"),
+            images,
+            previous_files=_collect_previous_files(mail_config),
+        )
 
-        return {"piece_count": piece_count, "gif_filename": gif_filename}
+        return {
+            "piece_count": piece_count,
+            "gif_filename": gif_filename,
+            "preview_images": preview_images,
+        }
 
     finally:
         if imap is not None:
@@ -362,6 +414,57 @@ async def check_informed_delivery(mail_config: dict[str, Any]) -> dict[str, Any]
                 imap.logout()
             except Exception:
                 pass
+
+
+def _collect_previous_files(mail_config: dict[str, Any]) -> list[str]:
+    """Return prior preview filenames stored on a mail account."""
+    files: list[str] = []
+    gif = mail_config.get("gif_filename")
+    if gif:
+        files.append(gif)
+    for name in mail_config.get("preview_images") or []:
+        if name and name not in files:
+            files.append(name)
+    return files
+
+
+async def _save_mail_previews(
+    account_key: str,
+    images: list[bytes],
+    previous_files: list[str] | None = None,
+) -> tuple[list[str], str | None]:
+    """
+    Persist individual JPEG previews and an optional animated GIF.
+
+    Returns:
+        Tuple of (preview_image_filenames, gif_filename).
+    """
+    _delete_mail_files(previous_files)
+
+    real_images = [img for img in images if img]
+    if not real_images:
+        return [], None
+
+    from PIL import Image
+    from io import BytesIO
+
+    preview_images: list[str] = []
+    safe_key = re.sub(r"[^a-zA-Z0-9]", "", str(account_key))[:12] or "mail"
+    batch = uuid.uuid4().hex[:8]
+
+    for index, img_bytes in enumerate(real_images):
+        try:
+            img = Image.open(BytesIO(img_bytes)).convert("RGB")
+            img.thumbnail((724, 320), Image.Resampling.LANCZOS)
+            filename = f"mail_{safe_key}_{batch}_{index}.jpg"
+            output_path = MAIL_IMAGES_DIR / filename
+            img.save(output_path, format="JPEG", quality=88, optimize=True)
+            preview_images.append(filename)
+        except Exception as exc:
+            logger.warning("Failed to save mail preview %s: %s", index, exc)
+
+    gif_filename = await _generate_mail_gif(real_images) if preview_images else None
+    return preview_images, gif_filename
 
 
 async def _generate_mail_gif(images: list[bytes]) -> str | None:
@@ -416,8 +519,8 @@ async def _generate_mail_gif(images: list[bytes]) -> str | None:
         import numpy as np
         np_frames = [np.array(f) for f in frames]
 
-        # Write animated GIF (2 second per frame)
-        imageio.mimwrite(str(output_path), np_frames, duration=2000, loop=0)
+        # Write animated GIF (2 seconds per frame)
+        imageio.mimwrite(str(output_path), np_frames, duration=2, loop=0)
 
         logger.info(f"Generated mail GIF: {filename}")
         return filename

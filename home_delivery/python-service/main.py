@@ -16,7 +16,7 @@ from typing import Any
 import aiohttp
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -31,7 +31,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Code version for deployment verification
-CODE_VERSION = "0.0.6"
+CODE_VERSION = "0.0.7"
 
 app = FastAPI(title="Home Delivery API")
 
@@ -342,6 +342,20 @@ async def refresh_package(package_id: str):
 # ============================================================================
 
 
+def _mail_image_url(filename: str | None) -> str | None:
+    if not filename:
+        return None
+    return f"/api/mail/image/{Path(filename).name}"
+
+
+def _mail_preview_payload(filenames: list[str] | None) -> list[dict[str, str]]:
+    return [
+        {"filename": name, "url": url}
+        for name in (filenames or [])
+        if name and (url := _mail_image_url(name))
+    ]
+
+
 @app.get("/api/mail")
 async def get_mail():
     """Get USPS Informed Delivery mail state."""
@@ -367,11 +381,8 @@ async def get_mail():
                 "last_check": a.get("last_check"),
                 "last_error": a.get("last_error"),
                 "gif_filename": a.get("gif_filename"),
-                "gif_url": (
-                    f"/api/mail/image/{a['gif_filename']}"
-                    if a.get("gif_filename")
-                    else None
-                ),
+                "gif_url": _mail_image_url(a.get("gif_filename")),
+                "preview_images": _mail_preview_payload(a.get("preview_images")),
             }
             for a in mail_state.get("accounts", [])
         ],
@@ -461,10 +472,12 @@ async def _sync_mail_accounts(account_ids: list[str] | None = None) -> dict[str,
             result = await check_informed_delivery(account)
             piece_count = result.get("piece_count", 0)
             gif_filename = result.get("gif_filename")
+            preview_images = result.get("preview_images") or []
             await config_store.update_mail_state(
                 account_id=account_id,
                 piece_count=piece_count,
                 gif_filename=gif_filename,
+                preview_images=preview_images,
                 last_error=None,
             )
             total_pieces += piece_count
@@ -475,7 +488,8 @@ async def _sync_mail_accounts(account_ids: list[str] | None = None) -> dict[str,
                 "label": label,
                 "success": True,
                 "piece_count": piece_count,
-                "gif_url": f"/api/mail/image/{gif_filename}" if gif_filename else None,
+                "gif_url": _mail_image_url(gif_filename),
+                "preview_images": _mail_preview_payload(preview_images),
             })
         except Exception as e:
             logger.error(f"Mail sync failed for {label}: {e}")
@@ -483,6 +497,7 @@ async def _sync_mail_accounts(account_ids: list[str] | None = None) -> dict[str,
                 account_id=account_id,
                 piece_count=account.get("piece_count", 0),
                 gif_filename=account.get("gif_filename"),
+                preview_images=account.get("preview_images") or [],
                 last_error=str(e),
             )
             results.append({
@@ -536,17 +551,24 @@ async def refresh_mail():
 
 @app.get("/api/mail/image/{filename}")
 async def get_mail_image(filename: str):
-    """Serve mail GIF image."""
-    # Sanitize filename
+    """Serve a saved mail preview image (JPEG/PNG/GIF)."""
     safe_filename = Path(filename).name
     image_path = MAIL_IMAGES_DIR / safe_filename
 
     if not image_path.exists():
         raise HTTPException(status_code=404, detail="Image not found")
 
+    media_types = {
+        ".gif": "image/gif",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".png": "image/png",
+    }
+    media_type = media_types.get(image_path.suffix.lower(), "application/octet-stream")
+
     return FileResponse(
         image_path,
-        media_type="image/gif",
+        media_type=media_type,
         headers={"Cache-Control": "public, max-age=300"},
     )
 

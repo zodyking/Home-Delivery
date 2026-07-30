@@ -2,7 +2,7 @@
  * Home Delivery Panel - Vanilla JS for HA custom panel / standalone Ingress
  * Design aligned with home-weather: topbar + gear settings, dashboard layout.
  */
-const PANEL_VERSION = "0.0.6";
+const PANEL_VERSION = "0.0.7";
 
 class HomeDeliveryPanel extends HTMLElement {
   constructor() {
@@ -31,6 +31,7 @@ class HomeDeliveryPanel extends HTMLElement {
     this._mailAccountModal = null;
     this._mailSyncing = false;
     this._mailSyncAccountId = null;
+    this._carouselTimers = [];
     this._dashboardSettled = false;
   }
 
@@ -114,7 +115,13 @@ class HomeDeliveryPanel extends HTMLElement {
     return list.filter((account) => account.enabled !== false && account.id !== home?.id);
   }
 
-  _mailPreviewHtml(gifUrl, label = "Mail preview") {
+  _mailPreviewHtml(account, label = "Mail preview") {
+    const previewImages = account?.preview_images || [];
+    if (previewImages.length > 0) {
+      return this._mailCarouselHtml(previewImages, label);
+    }
+
+    const gifUrl = account?.gif_url;
     if (!gifUrl) {
       return `
         <div class="mail-preview mail-preview--placeholder" aria-hidden="true">
@@ -130,6 +137,59 @@ class HomeDeliveryPanel extends HTMLElement {
           onerror="this.closest('.mail-preview')?.classList.add('mail-preview--broken'); this.remove();" />
       </div>
     `;
+  }
+
+  _mailCarouselHtml(images, label) {
+    const slides = images.map((image, index) => `
+      <figure class="mail-carousel-slide ${index === 0 ? "active" : ""}" data-index="${index}">
+        <img src="${this._esc(this._apiUrl(image.url))}" alt="${this._esc(label)} ${index + 1} of ${images.length}"
+          loading="${index === 0 ? "eager" : "lazy"}"
+          onerror="this.closest('.mail-carousel')?.classList.add('mail-carousel--broken');" />
+      </figure>
+    `).join("");
+
+    return `
+      <div class="mail-carousel" data-slide-count="${images.length}" aria-label="${this._esc(label)}">
+        <div class="mail-carousel-viewport">${slides}</div>
+        ${images.length > 1 ? `
+          <div class="mail-carousel-dots" aria-hidden="true">
+            ${images.map((_, index) => `<span class="mail-carousel-dot ${index === 0 ? "active" : ""}"></span>`).join("")}
+          </div>
+        ` : ""}
+      </div>
+    `;
+  }
+
+  _initMailCarousels() {
+    const root = this.shadowRoot;
+    if (!root) return;
+
+    this._carouselTimers.forEach((timer) => clearInterval(timer));
+    this._carouselTimers = [];
+
+    root.querySelectorAll(".mail-carousel[data-slide-count]").forEach((carousel) => {
+      const count = Number(carousel.dataset.slideCount || "0");
+      if (count <= 1) return;
+
+      const slides = carousel.querySelectorAll(".mail-carousel-slide");
+      const dots = carousel.querySelectorAll(".mail-carousel-dot");
+      let active = 0;
+
+      const show = (index) => {
+        active = index;
+        slides.forEach((slide, slideIndex) => {
+          slide.classList.toggle("active", slideIndex === index);
+        });
+        dots.forEach((dot, dotIndex) => {
+          dot.classList.toggle("active", dotIndex === index);
+        });
+      };
+
+      const timer = setInterval(() => {
+        show((active + 1) % count);
+      }, 3500);
+      this._carouselTimers.push(timer);
+    });
   }
 
   /** True when running inside Home Assistant ingress iframe. */
@@ -1174,7 +1234,7 @@ class HomeDeliveryPanel extends HTMLElement {
           <div class="mail-other-count">${account.piece_count || 0}</div>
           <div class="mail-other-count-label">pieces arriving</div>
         </div>
-        ${this._mailPreviewHtml(account.gif_url, `${label} mail preview`)}
+        ${this._mailPreviewHtml(account, `${label} mail preview`)}
         ${account.last_error ? `<div class="mail-other-error">${this._esc(account.last_error)}</div>` : ""}
       </article>
     `;
@@ -1228,7 +1288,7 @@ class HomeDeliveryPanel extends HTMLElement {
               <div class="mail-count-large">${pieceCount}</div>
               <div class="mail-count-label">pieces arriving</div>
             </div>
-            ${this._mailPreviewHtml(home?.gif_url, `${subLabel} mail preview`)}
+            ${this._mailPreviewHtml(home, `${subLabel} mail preview`)}
           </div>
           ${lastCheckStr ? `<div class="mail-meta">Last checked: ${lastCheckStr}</div>` : ""}
           ${home?.last_error ? `<div class="mail-meta mail-meta-warn">${this._esc(home.last_error)}</div>` : ""}
@@ -1981,6 +2041,8 @@ class HomeDeliveryPanel extends HTMLElement {
         this._handleAction(e, "toggle-mail-account", el.dataset);
       });
     });
+
+    this._initMailCarousels();
   }
 
   _attachSettingsHandlers() {
@@ -2685,6 +2747,87 @@ class HomeDeliveryPanel extends HTMLElement {
 
       .mail-preview--broken::after {
         content: "Preview unavailable";
+      }
+
+      .mail-carousel {
+        position: relative;
+        width: 100%;
+        min-width: 0;
+        max-width: min(100%, 320px);
+        justify-self: end;
+        aspect-ratio: 724 / 320;
+        border-radius: var(--radius-md);
+        overflow: hidden;
+        border: 1px solid var(--hd-border);
+        background: var(--hd-bg);
+        box-shadow: var(--shadow-md);
+      }
+
+      .mail-carousel-viewport {
+        position: relative;
+        width: 100%;
+        height: 100%;
+      }
+
+      .mail-carousel-slide {
+        position: absolute;
+        inset: 0;
+        margin: 0;
+        opacity: 0;
+        transition: opacity 0.6s ease;
+        pointer-events: none;
+      }
+
+      .mail-carousel-slide.active {
+        opacity: 1;
+        pointer-events: auto;
+      }
+
+      .mail-carousel-slide img {
+        width: 100%;
+        height: 100%;
+        object-fit: contain;
+        background: #fff;
+      }
+
+      .mail-carousel-dots {
+        position: absolute;
+        left: 0;
+        right: 0;
+        bottom: 8px;
+        display: flex;
+        justify-content: center;
+        gap: 6px;
+        pointer-events: none;
+      }
+
+      .mail-carousel-dot {
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        background: rgba(255, 255, 255, 0.45);
+        box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.35);
+      }
+
+      .mail-carousel-dot.active {
+        background: var(--hd-accent);
+      }
+
+      .mail-carousel--broken::after {
+        content: "Preview unavailable";
+        position: absolute;
+        inset: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 12px;
+        color: var(--hd-muted);
+        background: var(--hd-elevated);
+      }
+
+      .mail-other-card .mail-carousel {
+        max-width: none;
+        justify-self: stretch;
       }
 
       .mail-other-section {

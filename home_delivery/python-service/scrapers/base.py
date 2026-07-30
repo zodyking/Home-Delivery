@@ -33,6 +33,7 @@ async def _get_browser() -> Browser:
                     "--disable-setuid-sandbox",
                     "--disable-dev-shm-usage",
                     "--disable-gpu",
+                    "--disable-blink-features=AutomationControlled",
                 ],
             )
             logger.info("Browser launched successfully")
@@ -84,6 +85,9 @@ async def get_page(timeout_ms: int = 30000) -> AsyncGenerator[Page, None]:
         context.set_default_timeout(timeout_ms)
 
         page = await context.new_page()
+        await page.add_init_script(
+            "Object.defineProperty(navigator, 'webdriver', { get: () => undefined });"
+        )
         yield page
 
     finally:

@@ -287,12 +287,14 @@ class ConfigStore:
         account_id: str,
         piece_count: int,
         gif_filename: str | None = None,
+        preview_images: list[str] | None = None,
         last_error: str | None = None,
     ) -> None:
         """Update mail state for a specific account after IMAP check."""
         updates: dict[str, Any] = {
             "piece_count": piece_count,
             "gif_filename": gif_filename,
+            "preview_images": preview_images or [],
             "last_check": datetime.now(timezone.utc).isoformat(),
             "last_error": last_error,
         }
