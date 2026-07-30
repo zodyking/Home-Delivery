@@ -35,11 +35,14 @@ INFORMED_DELIVERY_SUBJECTS = [
 # Legacy alias
 DIGEST_SUBJECT = INFORMED_DELIVERY_SUBJECTS[0]
 
-# Images to filter out (not actual mail pieces / ads / branding)
+# Images to filter out (not actual mail pieces / ads / branding).
+# Local XChange / campaign ads typically use filenames like mailer-1201990448.jpg
 FILTER_PATTERNS = [
-    "mailerProvidedImage",
+    "mailerprovidedimage",
+    "mailer-",
+    "mailer_",
     "ra_0",
-    "Mail Attachment.txt",
+    "mail attachment.txt",
     "logo",
     "header",
     "footer",
@@ -53,15 +56,20 @@ FILTER_PATTERNS = [
     "advert",
     "promo",
     "marketing",
+    "content-",  # campaign creative assets (content-1201930673.jpg)
 ]
 
 # Promotional / non-letter content markers in Informed Delivery HTML
 PROMO_HTML_PATTERNS = [
     re.compile(r"campaign-from", re.IGNORECASE),
+    re.compile(r"campaign-representative", re.IGNORECASE),
+    re.compile(r"mail-campaign", re.IGNORECASE),
     re.compile(r"Local\s*XChange", re.IGNORECASE),
     re.compile(r"USPS\s+Smart\s+Lockers?", re.IGNORECASE),
     re.compile(r"mailerProvidedImage", re.IGNORECASE),
+    re.compile(r"mailer-\d+", re.IGNORECASE),
     re.compile(r"Learn more about your mail", re.IGNORECASE),
+    re.compile(r'alt=["\']campaign["\']', re.IGNORECASE),
 ]
 
 # Placeholder image reference in HTML when no scan available
@@ -129,19 +137,31 @@ def _is_valid_mail_image(filename: str) -> bool:
 
     lower = filename.lower()
 
-    # Must be an image
-    if not any(lower.endswith(ext) for ext in [".jpg", ".jpeg", ".png", ".gif"]):
-        return False
+    # Must be an image (Content-IDs without extension are handled separately)
+    has_image_ext = any(lower.endswith(ext) for ext in [".jpg", ".jpeg", ".png", ".gif"])
 
-    # Filter out known non-mail images
+    # Filter out known non-mail / campaign images (e.g. mailer-1201990448.jpg)
     for pattern in FILTER_PATTERNS:
-        if pattern.lower() in lower:
+        if pattern in lower:
             return False
+
+    if not has_image_ext:
+        return False
 
     return True
 
 
-def _append_unique_image(images: list[bytes], seen: set[int], payload: bytes | None) -> None:
+# Real letter scans from Informed Delivery usually look like 1007217285-018.jpg
+LETTER_SCAN_NAME_RE = re.compile(r"^\d{6,}-\d{2,4}\.(jpe?g|png)$", re.IGNORECASE)
+
+
+def _append_unique_image(
+    images: list[dict[str, Any]],
+    seen: set[int],
+    payload: bytes | None,
+    *,
+    name: str = "",
+) -> None:
     """Append decoded image bytes once (dedupe by size + leading bytes)."""
     if not payload or len(payload) < MIN_IMAGE_BYTES:
         return
@@ -149,15 +169,70 @@ def _append_unique_image(images: list[bytes], seen: set[int], payload: bytes | N
     if fingerprint in seen:
         return
     seen.add(fingerprint)
-    images.append(payload)
+    images.append({"bytes": payload, "name": name or ""})
+
+
+def _image_payloads(images: list[dict[str, Any]]) -> list[bytes]:
+    return [img["bytes"] for img in images if img.get("bytes")]
+
+
+def _select_mailpiece_images(
+    images: list[dict[str, Any]],
+    mailpiece_count: int | None,
+) -> list[bytes]:
+    """
+    Choose preview images that match the mailpiece count.
+
+    Prefer real letter-scan filenames (NNNNNN-018.jpg) over campaign creatives
+    (mailer-*.jpg) when extras remain after filtering.
+    """
+    if mailpiece_count is not None and mailpiece_count <= 0:
+        return []
+    if not images:
+        return []
+
+    letter_like = [
+        img for img in images
+        if LETTER_SCAN_NAME_RE.match(Path(img.get("name") or "").name)
+    ]
+    other = [img for img in images if img not in letter_like]
+
+    # Prefer letter scans, then any remaining non-promo images.
+    ordered = letter_like + other
+    if mailpiece_count is None:
+        return _image_payloads(ordered)
+
+    if len(ordered) > mailpiece_count:
+        logger.info(
+            "Selecting %s of %s extracted image(s) for mailpiece previews "
+            "(%s letter-scan name matches)",
+            mailpiece_count,
+            len(ordered),
+            len(letter_like),
+        )
+        # If we have enough named letter scans, use only those.
+        if len(letter_like) >= mailpiece_count:
+            ordered = letter_like
+        # Campaign creatives are usually listed before letter scans — prefer the
+        # trailing images when names are missing.
+        elif len(letter_like) == 0:
+            ordered = ordered[-mailpiece_count:]
+        ordered = ordered[:mailpiece_count]
+
+    return _image_payloads(ordered)
 
 
 def _strip_promo_html_sections(html: str) -> str:
     """Remove promotional Informed Delivery blocks (campaigns, Local XChange ads)."""
     cleaned = html
-    # Drop tables/divs that look like campaign / marketing cards.
+    # Drop the entire mail-campaign / Local XChange card blocks first.
     cleaned = re.sub(
-        r"(?is)<(table|tr|td|div)[^>]*(?:campaign-from|mailerProvidedImage|Local\s*XChange)[^>]*>.*?</\1>",
+        r'(?is)<div[^>]*id="[^"]*mail-campaign"[^>]*>.*?</div>',
+        " ",
+        cleaned,
+    )
+    cleaned = re.sub(
+        r"(?is)<(table|tr|td|div)[^>]*(?:campaign-from|campaign-representative|mailerProvidedImage|Local\s*XChange|mailer-\d+)[^>]*>.*?</\1>",
         " ",
         cleaned,
     )
@@ -173,7 +248,11 @@ def _html_looks_like_promo_context(snippet: str) -> bool:
     return any(p.search(snippet) for p in PROMO_HTML_PATTERNS)
 
 
-def _extract_images_from_html(msg: Message, images: list[bytes], seen: set[int]) -> None:
+def _extract_images_from_html(
+    msg: Message,
+    images: list[dict[str, Any]],
+    seen: set[int],
+) -> None:
     """Pull embedded base64 images from the HTML body, skipping promo ads."""
     for part in msg.walk():
         if part.get_content_type() != "text/html":
@@ -187,22 +266,29 @@ def _extract_images_from_html(msg: Message, images: list[bytes], seen: set[int])
             text,
             flags=re.IGNORECASE,
         ):
-            start = max(0, match.start() - 500)
-            end = min(len(text), match.end() + 500)
+            start = max(0, match.start() - 800)
+            end = min(len(text), match.end() + 800)
             if _html_looks_like_promo_context(text[start:end]):
                 continue
             blob = match.group(1).replace("\n", "").replace("\r", "")
             try:
-                _append_unique_image(images, seen, base64.b64decode(blob, validate=False))
+                _append_unique_image(
+                    images,
+                    seen,
+                    base64.b64decode(blob, validate=False),
+                    name="embedded.jpg",
+                )
             except Exception:
                 continue
 
 
-def _extract_images_from_message(msg: Message) -> list[bytes]:
+def _extract_images_from_message(msg: Message) -> list[dict[str, Any]]:
     """Extract real letter scan images from email MIME parts and HTML embeds."""
-    images: list[bytes] = []
+    images: list[dict[str, Any]] = []
     seen: set[int] = set()
     html = _get_message_html(msg)
+    # Work against promo-stripped HTML so CID lookups don't match campaign cards.
+    html_clean = _strip_promo_html_sections(html) if html else ""
 
     for part in msg.walk():
         content_type = part.get_content_type()
@@ -212,33 +298,42 @@ def _extract_images_from_message(msg: Message) -> list[bytes]:
         content_disposition = str(part.get("Content-Disposition", ""))
         filename = part.get_filename() or ""
         content_id = str(part.get("Content-ID", "")).strip("<>")
+        display_name = filename or content_id
 
-        # Skip obvious branding / ad assets when a filename is present.
+        # Skip obvious branding / ad assets (mailer-*.jpg, campaign, etc.).
         if filename and not _is_valid_mail_image(filename):
+            logger.debug("Skipping promo/non-mail image filename: %s", filename)
             continue
-        if content_id and not _is_valid_mail_image(content_id):
-            # Content-IDs like campaign/logo should be skipped even without extension.
+        if content_id:
             lower_cid = content_id.lower()
-            if any(p.lower() in lower_cid for p in FILTER_PATTERNS):
+            if any(p in lower_cid for p in FILTER_PATTERNS):
+                logger.debug("Skipping promo/non-mail Content-ID: %s", content_id)
                 continue
 
-        # Skip MIME images referenced only from promotional HTML blocks.
+        # Skip MIME images referenced from promotional HTML blocks.
+        is_promo = False
         if html and (filename or content_id):
             for token in filter(None, [filename, content_id]):
                 for ref in re.finditer(re.escape(token), html, flags=re.IGNORECASE):
-                    snippet = html[max(0, ref.start() - 800) : ref.end() + 800]
+                    snippet = html[max(0, ref.start() - 1200) : ref.end() + 1200]
                     if _html_looks_like_promo_context(snippet):
-                        filename = "__promo__"
+                        is_promo = True
                         break
-                if filename == "__promo__":
+                if is_promo:
                     break
-            if filename == "__promo__":
-                continue
+        if is_promo:
+            logger.debug("Skipping image referenced in promo HTML: %s", display_name)
+            continue
 
         # Prefer attachments and inline scans; unnamed inline parts are often mail pieces.
         if filename or "inline" in content_disposition.lower() or "attachment" in content_disposition.lower():
+            # If HTML still exists after promo strip and this CID is only in stripped
+            # campaign HTML, skip it.
+            if content_id and html_clean and content_id not in html_clean and content_id in html:
+                logger.debug("Skipping image only present in campaign HTML: %s", content_id)
+                continue
             payload = part.get_payload(decode=True)
-            _append_unique_image(images, seen, payload)
+            _append_unique_image(images, seen, payload, name=display_name)
 
     _extract_images_from_html(msg, images, seen)
     return images
@@ -624,14 +719,16 @@ async def check_informed_delivery(mail_config: dict[str, Any]) -> dict[str, Any]
         digest = _parse_delivery_digest(msg)
 
         # Extract real letter scans only (exclude Local XChange / campaign ads).
-        images = _extract_images_from_message(msg)
+        extracted = _extract_images_from_message(msg)
 
         if digest["mailpiece_count"] is not None:
             mailpiece_count = digest["mailpiece_count"]
         else:
-            if _has_missing_mailpiece_placeholder(msg):
-                images.append(b"")
-            mailpiece_count = len(images)
+            mailpiece_count = len(extracted)
+            if _has_missing_mailpiece_placeholder(msg) and mailpiece_count == 0:
+                mailpiece_count = 0
+
+        images = _select_mailpiece_images(extracted, mailpiece_count)
 
         # Only Expected Today packages count toward the dashboard package total.
         package_count = digest.get("package_count") or 0
@@ -639,10 +736,13 @@ async def check_informed_delivery(mail_config: dict[str, Any]) -> dict[str, Any]
 
         logger.info(
             "Parsed Informed Delivery: %s mailpiece(s), %s Expected Today package(s), "
-            "%s tracking number(s) discovered (sections=%s)",
+            "%s tracking number(s) discovered, %s preview image(s) from %s extracted "
+            "(sections=%s)",
             mailpiece_count,
             package_count,
             len(tracking_numbers),
+            len(images),
+            len(extracted),
             digest.get("section_counts"),
         )
 
