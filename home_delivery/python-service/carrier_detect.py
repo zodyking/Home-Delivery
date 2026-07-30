@@ -16,7 +16,7 @@ CARRIERS: list[CarrierType] = ["usps", "ups", "fedex"]
 # Tracking URL templates (user-provided link logic)
 TRACKING_URLS: dict[CarrierType, str] = {
     "usps": "https://tools.usps.com/tracking/{tracking_number}",
-    "ups": "https://www.ups.com/track?tracknum={tracking_number}",
+    "ups": "https://www.ups.com/track?tracknum={tracking_number}&loc=en_US&requester=ST/trackdetails",
     "fedex": "https://www.fedex.com/fedextrack/?trknbr={tracking_number}",
 }
 

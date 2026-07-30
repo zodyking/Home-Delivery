@@ -29,11 +29,13 @@ async def _get_browser() -> Browser:
             _browser = await _playwright.chromium.launch(
                 headless=True,
                 args=[
+                    "--headless=new",
                     "--no-sandbox",
                     "--disable-setuid-sandbox",
                     "--disable-dev-shm-usage",
                     "--disable-gpu",
                     "--disable-blink-features=AutomationControlled",
+                    "--disable-http2",
                 ],
             )
             logger.info("Browser launched successfully")
@@ -52,6 +54,11 @@ async def close_browser() -> None:
         if _playwright:
             await _playwright.stop()
             _playwright = None
+
+
+async def reset_browser_on_failure() -> None:
+    """Reset the shared browser after a transport-level navigation failure."""
+    await close_browser()
 
 
 @asynccontextmanager
@@ -76,17 +83,23 @@ async def get_page(timeout_ms: int = 30000) -> AsyncGenerator[Page, None]:
             user_agent=(
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/120.0.0.0 Safari/537.36"
+                "Chrome/131.0.0.0 Safari/537.36"
             ),
             extra_http_headers={
                 "Accept-Language": "en-US,en;q=0.9",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             },
+            ignore_https_errors=True,
         )
         context.set_default_timeout(timeout_ms)
 
         page = await context.new_page()
         await page.add_init_script(
-            "Object.defineProperty(navigator, 'webdriver', { get: () => undefined });"
+            """
+            Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+            Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+            window.chrome = { runtime: {} };
+            """
         )
         yield page
 
