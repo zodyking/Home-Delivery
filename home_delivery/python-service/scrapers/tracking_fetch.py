@@ -7,8 +7,8 @@ behavior — a carrier is only confirmed when real events are returned.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
-from datetime import datetime, timezone
 from typing import Any
 
 from carrier_detect import (
@@ -21,7 +21,6 @@ from carrier_detect import (
 from .base import get_page, reset_browser_on_failure
 from .navigation import (
     HTTP2_ERROR_MARKERS,
-    _ups_is_skeleton_page,
     goto_tracking_page,
     prepare_ups_tracking_page,
     wait_for_estes_tracking,
@@ -32,6 +31,16 @@ from .navigation import (
 from .parsers import parse_estes_tracking, parse_ups_tracking, parse_usps_tracking
 
 logger = logging.getLogger(__name__)
+
+# Hard cap so add-package / refresh never block the UI for many minutes.
+CARRIER_FETCH_TIMEOUTS: dict[str, float] = {
+    "ups": 90.0,
+    "usps": 180.0,
+    "estes": 75.0,
+}
+
+UPS_WAIT_MS = 45000
+UPS_PAGE_TIMEOUT_MS = 75000
 
 
 async def _fetch_usps(page, tracking_number: str) -> dict[str, Any]:
@@ -69,59 +78,32 @@ async def _fetch_usps(page, tracking_number: str) -> dict[str, Any]:
     return {"error": last_error}
 
 
-async def _ups_scrape_ready_page(
-    page,
-    tracking_number: str,
-    *,
-    wait_ms: int = 90000,
-) -> dict[str, Any] | None:
-    """Navigate/wait/parse when UPS results are ready; None if still skeleton."""
-    await prepare_ups_tracking_page(page, tracking_number)
-
-    if await wait_for_ups_tracking(page, tracking_number, timeout_ms=wait_ms):
-        return await parse_ups_tracking(page)
-
-    if await _ups_is_skeleton_page(page):
-        logger.info("UPS still skeleton for %s after wait — reloading once", tracking_number)
-        try:
-            await page.reload(wait_until="domcontentloaded", timeout=45000)
-        except Exception as exc:
-            logger.warning("UPS reload failed for %s: %s", tracking_number, exc)
-            return None
-
-        await prepare_ups_tracking_page(page, tracking_number)
-        if await wait_for_ups_tracking(page, tracking_number, timeout_ms=60000):
-            return await parse_ups_tracking(page)
-
-    return None
-
-
 async def _fetch_ups(page, tracking_number: str) -> dict[str, Any]:
-    """Fetch UPS tracking data — multi-pass for HA Linux containers."""
-    urls = [
-        get_tracking_url("ups", tracking_number),
-        f"https://www.ups.com/track?tracknum={tracking_number}&loc=en_US",
-    ]
+    """
+    Fetch UPS tracking — same fast path as the local test script.
 
-    async def _try_urls(*, warmed: bool) -> dict[str, Any] | None:
+    One direct track-details URL, ~45s wait (with in-loop skeleton reload),
+    then a single warm-up retry if the container stayed on skeleton HTML.
+    """
+    url = get_tracking_url("ups", tracking_number)
+
+    async def _scrape_once(*, warmed: bool) -> dict[str, Any] | None:
         if warmed:
             await warmup_ups_session(page)
 
-        for index, url in enumerate(urls):
-            await goto_tracking_page(page, url, timeout_ms=60000)
-            result = await _ups_scrape_ready_page(page, tracking_number)
-            if result:
-                return result
-            if index + 1 < len(urls):
-                logger.info("UPS primary URL missed for %s; trying alternate", tracking_number)
+        await goto_tracking_page(page, url, timeout_ms=UPS_WAIT_MS)
+        await prepare_ups_tracking_page(page, tracking_number)
+
+        if await wait_for_ups_tracking(page, tracking_number, timeout_ms=UPS_WAIT_MS):
+            return await parse_ups_tracking(page)
         return None
 
-    parsed = await _try_urls(warmed=False)
+    parsed = await _scrape_once(warmed=False)
     if parsed:
         return parsed
 
     logger.info("UPS direct fetch missed for %s; retrying after warm-up session", tracking_number)
-    parsed = await _try_urls(warmed=True)
+    parsed = await _scrape_once(warmed=True)
     if parsed:
         return parsed
 
@@ -162,27 +144,11 @@ _FETCH_FUNCTIONS = {
 }
 
 
-async def fetch_carrier_tracking(
+async def _fetch_carrier_tracking_impl(
     carrier: CarrierType,
-    tracking_number: str,
+    normalized: str,
 ) -> dict[str, Any]:
-    """
-    Fetch tracking data for a specific carrier.
-
-    Returns dict with:
-        - On success: events, status, status_detail, last_polled, error=None
-        - On failure: error string, possibly empty events
-
-    Args:
-        carrier: The carrier to fetch from (usps, ups, fedex).
-        tracking_number: The tracking number.
-
-    Returns:
-        Tracking result dict.
-    """
-    normalized = normalize_tracking_number(tracking_number)
     fetch_fn = _FETCH_FUNCTIONS.get(carrier)
-
     if not fetch_fn:
         return {"error": f"Unknown carrier: {carrier}"}
 
@@ -193,7 +159,7 @@ async def fetch_carrier_tracking(
         return await fetch_fn(None, normalized)
 
     async def _do_fetch() -> dict[str, Any]:
-        page_timeout_ms = 120000 if carrier == "ups" else 70000
+        page_timeout_ms = UPS_PAGE_TIMEOUT_MS if carrier == "ups" else 70000
         async with get_page(timeout_ms=page_timeout_ms) as page:
             return await fetch_fn(page, normalized)
 
@@ -241,28 +207,22 @@ async def fetch_carrier_tracking(
         and _needs_browser_retry(result)
         and not (result.get("events") or [])
     ):
-        max_resets = 2 if carrier == "ups" else 1
-        for reset_num in range(max_resets):
-            logger.warning(
-                "%s fetch blocked (%s); resetting browser and retrying (%s/%s)",
+        logger.warning(
+            "%s fetch blocked (%s); resetting browser and retrying once",
+            carrier.upper(),
+            result.get("error"),
+        )
+        await reset_browser_on_failure()
+        try:
+            result = await _do_fetch()
+        except Exception as retry_exc:
+            logger.error(
+                "%s browser-reset retry failed for %s: %s",
                 carrier.upper(),
-                result.get("error"),
-                reset_num + 1,
-                max_resets,
+                normalized,
+                retry_exc,
             )
-            await reset_browser_on_failure()
-            try:
-                result = await _do_fetch()
-            except Exception as retry_exc:
-                logger.error(
-                    "%s browser-reset retry failed for %s: %s",
-                    carrier.upper(),
-                    normalized,
-                    retry_exc,
-                )
-                return {"error": str(retry_exc)}
-            if not _needs_browser_retry(result) or (result.get("events") or []):
-                break
+            return {"error": str(retry_exc)}
 
     events = result.get("events") or []
     logger.info(
@@ -275,6 +235,53 @@ async def fetch_carrier_tracking(
     )
 
     return result
+
+
+async def fetch_carrier_tracking(
+    carrier: CarrierType,
+    tracking_number: str,
+) -> dict[str, Any]:
+    """
+    Fetch tracking data for a specific carrier.
+
+    Returns dict with:
+        - On success: events, status, status_detail, last_polled, error=None
+        - On failure: error string, possibly empty events
+
+    Args:
+        carrier: The carrier to fetch from (usps, ups, fedex).
+        tracking_number: The tracking number.
+
+    Returns:
+        Tracking result dict.
+    """
+    normalized = normalize_tracking_number(tracking_number)
+    if not normalized:
+        return {"error": "Invalid tracking number"}
+
+    timeout = CARRIER_FETCH_TIMEOUTS.get(carrier)
+    if timeout is None:
+        return await _fetch_carrier_tracking_impl(carrier, normalized)
+
+    try:
+        return await asyncio.wait_for(
+            _fetch_carrier_tracking_impl(carrier, normalized),
+            timeout=timeout,
+        )
+    except asyncio.TimeoutError:
+        logger.warning(
+            "%s fetch timed out after %.0fs for %s",
+            carrier.upper(),
+            timeout,
+            normalized,
+        )
+        return {
+            "error": (
+                f"{carrier.upper()} tracking timed out — "
+                "package saved; will retry on next poll"
+            ),
+            "status": "Pending",
+        }
 
 
 async def fetch_tracking_auto(

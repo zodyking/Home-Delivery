@@ -341,7 +341,7 @@ def _ups_tracking_ready_js() -> str:
 async def wait_for_ups_tracking(
     page: Page,
     tracking_number: str,
-    timeout_ms: int = 90000,
+    timeout_ms: int = 45000,
 ) -> bool:
     """
     Wait until the UPS tracking results UI is actually ready.
