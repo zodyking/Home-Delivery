@@ -1054,6 +1054,73 @@ class HomeDeliveryPanel extends HTMLElement {
   // Add Package Wizard Helpers
   // ============================================================================
 
+  _syncWizardFromForm() {
+    const wiz = this._addPackageWizard;
+    const s = this.shadowRoot;
+    if (!wiz || !s) return;
+
+    const trackingInput = s.querySelector("#wizard-tracking");
+    if (trackingInput) {
+      wiz.tracking = trackingInput.value?.trim() || wiz.tracking || "";
+    }
+
+    const carrierSelect = s.querySelector("#wizard-carrier");
+    if (carrierSelect) {
+      wiz.carrier = carrierSelect.value || wiz.carrier || "";
+    }
+
+    const recipientInput = s.querySelector("#wizard-recipient");
+    if (recipientInput) {
+      wiz.recipient = recipientInput.value?.trim() || "";
+    }
+
+    const destSelect = s.querySelector("#wizard-destination-select");
+    if (destSelect) {
+      const value = destSelect.value;
+      if (value === "other") {
+        wiz.destinationMode = "other";
+        wiz.destinationAccountId = null;
+      } else if (value) {
+        wiz.destinationMode = "account";
+        wiz.destinationAccountId = value;
+        const account = this._getMailAccount(value);
+        if (account) {
+          wiz.destinationOther = account.label || wiz.destinationOther || "";
+        }
+      }
+    }
+
+    const otherInput = s.querySelector("#wizard-destination-other");
+    if (otherInput) {
+      wiz.destinationOther = otherInput.value?.trim() || wiz.destinationOther || "";
+    }
+  }
+
+  _wizardRecipientInputValue(wiz) {
+    const raw = (wiz.recipient || "").trim();
+    if (wiz.completingDetails && this._isPlaceholderRecipient(raw)) {
+      return "";
+    }
+    return raw;
+  }
+
+  _wizardHasKnownDestination(wiz) {
+    return !!(wiz.destinationAccountId || (wiz.destinationOther || "").trim());
+  }
+
+  _resolveWizardDestination(wiz) {
+    let destination = (wiz.destinationOther || "").trim();
+    let destinationAccountId = wiz.destinationAccountId || null;
+
+    if (wiz.destinationAccountId) {
+      const account = this._getMailAccount(wiz.destinationAccountId);
+      destination = (account?.label || destination || "").trim();
+      destinationAccountId = wiz.destinationAccountId;
+    }
+
+    return { destination, destinationAccountId };
+  }
+
   _isPlaceholderRecipient(name) {
     const value = (name || "").trim().toLowerCase();
     return !value || value === "someone";
@@ -1092,12 +1159,11 @@ class HomeDeliveryPanel extends HTMLElement {
       wiz.step = 2;
       this._render();
     } else if (wiz.step === 2) {
-      const recipientInput = s.querySelector("#wizard-recipient");
-      wiz.recipient = recipientInput?.value?.trim() || "";
+      this._syncWizardFromForm();
 
-      if (wiz.completingDetails && (wiz.destinationAccountId || wiz.destinationOther)) {
+      if (wiz.completingDetails && this._wizardHasKnownDestination(wiz)) {
         if (this._isPlaceholderRecipient(wiz.recipient)) {
-          this._showToast("Please enter who this package is for", { error: true });
+          this._showToast("Enter a real name — Someone is only a placeholder on the card", { error: true });
           return;
         }
         await this._handleWizardSubmit();
@@ -1134,22 +1200,27 @@ class HomeDeliveryPanel extends HTMLElement {
     const wiz = this._addPackageWizard;
     if (!wiz) return;
 
+    this._syncWizardFromForm();
+
     const s = this.shadowRoot;
 
-    // Get destination
     let destination = "";
     let destinationAccountId = null;
 
-    const accounts = this._getMailAccounts();
-    const hasAccounts = accounts.length > 0;
-
-    if (hasAccounts && wiz.destinationMode === "account" && wiz.destinationAccountId) {
-      const account = this._getMailAccount(wiz.destinationAccountId);
-      destination = account?.label || "";
-      destinationAccountId = wiz.destinationAccountId;
+    if (wiz.completingDetails && this._wizardHasKnownDestination(wiz)) {
+      ({ destination, destinationAccountId } = this._resolveWizardDestination(wiz));
     } else {
-      const otherInput = s.querySelector("#wizard-destination-other");
-      destination = otherInput?.value?.trim() || wiz.destinationOther || "";
+      const accounts = this._getMailAccounts();
+      const hasAccounts = accounts.length > 0;
+
+      if (hasAccounts && wiz.destinationMode === "account" && wiz.destinationAccountId) {
+        const account = this._getMailAccount(wiz.destinationAccountId);
+        destination = account?.label || "";
+        destinationAccountId = wiz.destinationAccountId;
+      } else {
+        const otherInput = s.querySelector("#wizard-destination-other");
+        destination = otherInput?.value?.trim() || wiz.destinationOther || "";
+      }
     }
 
     if (!wiz.tracking || !wiz.carrier) {
@@ -1158,22 +1229,13 @@ class HomeDeliveryPanel extends HTMLElement {
     }
 
     if (wiz.completingDetails && this._isPlaceholderRecipient(wiz.recipient)) {
-      this._showToast("Please enter who this package is for", { error: true });
+      this._showToast("Enter a real name — Someone is only a placeholder on the card", { error: true });
       return;
     }
 
     if (!destination && !wiz.completingDetails) {
       this._showToast("Please choose a destination", { error: true });
       return;
-    }
-
-    if (!destination && wiz.completingDetails) {
-      destination = wiz.destinationOther || "";
-      if (wiz.destinationAccountId) {
-        const account = this._getMailAccount(wiz.destinationAccountId);
-        destination = account?.label || destination;
-        destinationAccountId = wiz.destinationAccountId;
-      }
     }
 
     wiz.submitting = true;
@@ -1407,6 +1469,9 @@ class HomeDeliveryPanel extends HTMLElement {
   // ============================================================================
 
   _render() {
+    if (this._addPackageWizard) {
+      this._syncWizardFromForm();
+    }
     const s = this.shadowRoot;
     if (!s) return;
     this._applyTheme();
@@ -2836,17 +2901,28 @@ class HomeDeliveryPanel extends HTMLElement {
   }
 
   _renderWizardStep2(wiz) {
+    const knownDestination = wiz.completingDetails && this._wizardHasKnownDestination(wiz);
+    const { destination: resolvedDestination } = knownDestination
+      ? this._resolveWizardDestination(wiz)
+      : { destination: "" };
+
     return `
       <div class="wizard-step-content">
         ${wiz.completingDetails ? `
           <p class="hint">Auto-discovered from USPS Informed Delivery — tell us who it's for.</p>
         ` : ""}
+        ${knownDestination && resolvedDestination ? `
+          <div class="wizard-summary wizard-summary--destination">
+            <div class="small-label">Delivering to</div>
+            <div>${this._esc(resolvedDestination)}</div>
+          </div>
+        ` : ""}
         <div class="form-group">
           <label for="wizard-recipient">Who is this package for?</label>
           <input type="text" id="wizard-recipient"
-            placeholder="e.g., Mom, John, Office"
-            value="${this._esc(wiz.recipient || "")}" />
-          <p class="hint">${wiz.completingDetails ? "Required to finish setup" : "Optional — used for announcements"}</p>
+            placeholder="${wiz.completingDetails ? "e.g., Devon, Mom, Office" : "e.g., Mom, John, Office"}"
+            value="${this._esc(this._wizardRecipientInputValue(wiz))}" />
+          <p class="hint">${wiz.completingDetails ? "Required — replace the Someone placeholder with a real name" : "Optional — used for announcements"}</p>
         </div>
         <div class="wizard-carrier-summary">
           ${this._carrierBadge(wiz.carrier)}
@@ -2858,7 +2934,9 @@ class HomeDeliveryPanel extends HTMLElement {
         ${wiz.completingDetails
           ? `<button type="button" class="btn" data-action="close-wizard">Cancel</button>`
           : `<button type="button" class="btn btn-ghost" data-action="wizard-back">Back</button>`}
-        <button type="button" class="btn btn-primary" data-action="wizard-next">Next</button>
+        <button type="button" class="btn btn-primary" data-action="${knownDestination ? "wizard-submit" : "wizard-next"}" ${wiz.submitting ? "disabled" : ""}>
+          ${wiz.submitting ? "Saving..." : (knownDestination ? "Save Details" : "Next")}
+        </button>
       </div>
     `;
   }
@@ -3349,7 +3427,7 @@ class HomeDeliveryPanel extends HTMLElement {
           step: 2,
           tracking: pkg.tracking_number || "",
           carrier: pkg.carrier || null,
-          recipient: this._isPlaceholderRecipient(pkg.recipient) ? "" : (pkg.recipient || ""),
+          recipient: "",
           destinationAccountId: pkg.destination_account_id || pkg.source_account_id || null,
           destinationOther: pkg.destination || "",
           destinationMode: (pkg.destination_account_id || pkg.source_account_id) ? "account" : (pkg.destination ? "other" : null),
