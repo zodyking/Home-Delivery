@@ -1816,7 +1816,7 @@ class HomeDeliveryPanel extends HTMLElement {
         <section class="pkg-label">
           <header class="label-header">
             <div class="service-block service-block--full">
-              <strong>${this._esc(meta.shipperName || meta.service)}</strong>
+              <strong>${this._esc(meta.label || meta.service)}</strong>
               <span>${this._esc(meta.subtitle)}</span>
             </div>
           </header>
@@ -2754,7 +2754,7 @@ class HomeDeliveryPanel extends HTMLElement {
         ${selectedCarrier ? `
           <div class="wizard-carrier-result">
             ${this._carrierBadge(selectedCarrier)}
-            <span class="wizard-carrier-text">${this._esc(this._carrierMeta(selectedCarrier).shipperName)}</span>
+            <span class="wizard-carrier-text">${this._esc(this._carrierMeta(selectedCarrier).label)}</span>
           </div>
         ` : ""}
       </div>
