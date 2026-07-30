@@ -187,6 +187,7 @@ class HomeDeliveryPanel extends HTMLElement {
         <img src="${this._esc(this._apiUrl(image.url))}" alt="${this._esc(label)} ${index + 1} of ${images.length}"
           loading="${index === 0 ? "eager" : "lazy"}"
           onerror="this.closest('.mail-carousel')?.classList.add('mail-carousel--broken');" />
+        <span class="mail-carousel-badge">Letter #${index + 1}</span>
       </figure>
     `).join("");
 
@@ -2701,11 +2702,11 @@ class HomeDeliveryPanel extends HTMLElement {
         position: relative;
         overflow: hidden;
         padding: 0;
-        min-height: clamp(200px, 42vw, 280px);
+        min-height: auto;
       }
 
       .mail-hero-card--empty .mail-hero-inner {
-        min-height: clamp(180px, 36vw, 220px);
+        min-height: clamp(140px, 28vw, 180px);
       }
 
       .mail-hero-bg {
@@ -2753,7 +2754,7 @@ class HomeDeliveryPanel extends HTMLElement {
         display: flex;
         justify-content: center;
         align-items: center;
-        min-height: clamp(160px, 36vw, 260px);
+        min-height: clamp(100px, 22vw, 160px);
       }
 
       .mail-hero-counts {
@@ -2822,7 +2823,7 @@ class HomeDeliveryPanel extends HTMLElement {
 
       .mail-preview img {
         width: 100%;
-        max-height: clamp(160px, 36vw, 260px);
+        max-height: clamp(100px, 22vw, 160px);
         object-fit: contain;
         object-position: center;
         border-radius: var(--radius-md);
@@ -2836,7 +2837,7 @@ class HomeDeliveryPanel extends HTMLElement {
         align-items: center;
         justify-content: center;
         width: 100%;
-        min-height: clamp(160px, 36vw, 260px);
+        min-height: clamp(100px, 22vw, 160px);
         aspect-ratio: auto;
         border-radius: var(--radius-md);
         border: 1px dashed var(--hd-border-strong);
@@ -2876,7 +2877,7 @@ class HomeDeliveryPanel extends HTMLElement {
         width: 100%;
         min-width: 0;
         max-width: 100%;
-        min-height: clamp(160px, 36vw, 260px);
+        min-height: clamp(100px, 22vw, 160px);
         aspect-ratio: 724 / 320;
         border-radius: var(--radius-md);
         overflow: hidden;
@@ -2910,6 +2911,22 @@ class HomeDeliveryPanel extends HTMLElement {
         height: 100%;
         object-fit: contain;
         background: #fff;
+      }
+
+      .mail-carousel-badge {
+        position: absolute;
+        top: 8px;
+        left: 8px;
+        padding: 4px 10px;
+        font-size: 11px;
+        font-weight: 600;
+        letter-spacing: 0.02em;
+        color: #fff;
+        background: rgba(0, 0, 0, 0.65);
+        border-radius: 4px;
+        pointer-events: none;
+        z-index: 2;
+        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
       }
 
       .mail-carousel-dots {
