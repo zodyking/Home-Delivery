@@ -17,7 +17,7 @@ from data_config import DATA_DIR
 logger = logging.getLogger(__name__)
 
 CONFIG_FILE = DATA_DIR / "home_delivery_config.json"
-STORAGE_VERSION = 2
+STORAGE_VERSION = 3
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "_version": STORAGE_VERSION,
@@ -30,7 +30,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "history": {},
     },
     "media_players": [],
+    # Per announcement type → entity_id → { volume, bypass } (home-weather parity)
     "announcement_players": {},
+    "message_prefix": "Home Delivery update",
     "tts": {
         "enabled": False,
         "enable_status_change": True,

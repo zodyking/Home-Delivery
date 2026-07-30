@@ -4,6 +4,7 @@ DOM parsers for carrier tracking pages (executed in-browser via Playwright).
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime, timezone
 from typing import Any
 
@@ -397,32 +398,26 @@ async def expand_estes_details(page: Page) -> None:
     """
     Expand Estes result row + Shipment History accordion.
 
-    Flow matches My Estes UI: click the status-row chevron, then ensure
-    the Shipment History panel is open and scrolled into view.
+    Prefer "Expand All" (fastest), then row chevron + history panel.
     """
-    # Expand the main results row via the toggle chevron column.
-    toggle = page.locator("td.mat-column-toggle, .mat-column-toggle").first
     try:
-        if await toggle.count() > 0:
-            # Prefer clicking the down chevron when the row is collapsed.
-            down = toggle.locator(".fa-chevron-down")
-            if await down.count() > 0:
-                await down.first.click(timeout=4000)
-            else:
-                await toggle.click(timeout=4000)
-            await page.wait_for_timeout(800)
+        expand_all = page.get_by_role("button", name=re.compile(r"Expand All", re.I))
+        if await expand_all.count() > 0:
+            await expand_all.first.click(timeout=2500)
+            await page.wait_for_timeout(350)
+        else:
+            toggle = page.locator("td.mat-column-toggle, .mat-column-toggle").first
+            if await toggle.count() > 0:
+                down = toggle.locator(".fa-chevron-down")
+                if await down.count() > 0:
+                    await down.first.click(timeout=2500)
+                else:
+                    await toggle.click(timeout=2500)
+                await page.wait_for_timeout(350)
     except Exception as exc:
-        logger.debug("Estes row expand click failed: %s", exc)
+        logger.debug("Estes expand click failed: %s", exc)
 
-    # Some builds expose a status bar chevron (image 2).
-    try:
-        status_bar = page.locator(".status-block, .tbl-header-status").first
-        if await status_bar.count() > 0:
-            await status_bar.scroll_into_view_if_needed()
-    except Exception:
-        pass
-
-    # Open Shipment History expansion panel if collapsed.
+    # Ensure Shipment History panel is open if still collapsed.
     history_opened = await page.evaluate(
         """() => {
           const headers = Array.from(
@@ -444,19 +439,10 @@ async def expand_estes_details(page: Page) -> None:
     )
     logger.debug("Estes history expand state: %s", history_opened)
     if history_opened == "clicked":
-        await page.wait_for_timeout(1000)
-
-    # Scroll history into view for lazy render.
-    try:
-        history = page.get_by_text("Shipment History", exact=False).first
-        if await history.count() > 0:
-            await history.scroll_into_view_if_needed()
-            await page.wait_for_timeout(400)
-    except Exception:
-        pass
+        await page.wait_for_timeout(300)
 
     try:
-        await page.wait_for_selector("dl.wizard dt, .status-block span", timeout=8000)
+        await page.wait_for_selector("dl.wizard dt, .status-block span, td.mat-column-status", timeout=4000)
     except Exception:
         pass
 

@@ -86,7 +86,19 @@ async def probe_carrier_result(tracking_number: str) -> dict:
     carrier, result = await fetch_tracking_auto(normalized)
 
     if not carrier:
-        error = result.get("error", "Could not determine carrier")
+        # Prefer the generic auto-detect message; keep last_carrier_error in logs only.
+        error = result.get("error") or "Could not determine carrier for this tracking number."
+        if error and error.lower().startswith(("estes ", "ups ", "usps ", "fedex ")):
+            error = (
+                "Could not determine carrier for this tracking number. "
+                "Check the number and try again."
+            )
+        logger.warning(
+            "Probe failed for %s: %s (last=%s)",
+            normalized,
+            error,
+            result.get("last_carrier_error") or result.get("error"),
+        )
         return {
             "error": error,
             "tracking_number": normalized,

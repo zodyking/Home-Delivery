@@ -1,6 +1,6 @@
 """
 TTS trigger logic for package status changes and mail delivery.
-Respects quiet hours and user preferences.
+Respects quiet hours, per-type toggles, media-player skip/volume, and message prefix.
 """
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from datetime import datetime, time
 from typing import Any
 
 from config_store import config_store
-from tts_engine import send_tts
+from tts_engine import dispatch_tts
 
 logger = logging.getLogger(__name__)
 
@@ -24,7 +24,7 @@ def _parse_time(t: str) -> time | None:
 
 
 def _in_quiet_hours(start: str, end: str) -> bool:
-    """Check if current time is within allowed announcement hours."""
+    """Return True when announcements should be suppressed (outside allowed window)."""
     now = datetime.now().time()
     start_time = _parse_time(start)
     end_time = _parse_time(end)
@@ -32,11 +32,9 @@ def _in_quiet_hours(start: str, end: str) -> bool:
     if not start_time or not end_time:
         return False
 
-    # Handle day-spanning ranges (e.g., 22:00 to 08:00)
     if start_time <= end_time:
         return not (start_time <= now <= end_time)
-    else:
-        return end_time < now < start_time
+    return end_time < now < start_time
 
 
 async def _should_announce(event_type: str) -> bool:
@@ -47,7 +45,6 @@ async def _should_announce(event_type: str) -> bool:
     if not tts.get("enabled"):
         return False
 
-    # Check event type toggle
     toggle_map = {
         "status_change": "enable_status_change",
         "out_for_delivery": "enable_out_for_delivery",
@@ -59,7 +56,6 @@ async def _should_announce(event_type: str) -> bool:
     if toggle_key and not tts.get(toggle_key, True):
         return False
 
-    # Check quiet hours
     start = tts.get("start_time", "08:00")
     end = tts.get("end_time", "21:00")
 
@@ -68,12 +64,6 @@ async def _should_announce(event_type: str) -> bool:
         return False
 
     return True
-
-
-async def _get_media_players() -> list[dict[str, Any]]:
-    """Get configured media players."""
-    config = await config_store.load()
-    return config.get("media_players", [])
 
 
 def _build_package_message(
@@ -88,7 +78,6 @@ def _build_package_message(
     status = package.get("status", "")
     carrier = (package.get("carrier") or "").upper()
 
-    # Build recipient/destination context
     context = ""
     if recipient and destination:
         context = f" for {recipient} going to {destination}"
@@ -104,7 +93,6 @@ def _build_package_message(
         return f"Heads up! Your {carrier} package{context} is out for delivery."
 
     if status_changed:
-        # Get latest event for details
         events = package.get("events", [])
         location = ""
         if events:
@@ -124,16 +112,7 @@ async def trigger_package_tts(
     newly_ofd: bool = False,
     newly_delivered: bool = False,
 ) -> None:
-    """
-    Trigger TTS announcement for package status change.
-
-    Args:
-        package: The package data dict.
-        status_changed: True if status changed from previous poll.
-        newly_ofd: True if package just went out for delivery.
-        newly_delivered: True if package was just delivered.
-    """
-    # Determine event type for toggle check
+    """Trigger TTS announcement for package status change."""
     if newly_delivered:
         event_type = "delivered"
     elif newly_ofd:
@@ -152,37 +131,13 @@ async def trigger_package_tts(
         newly_delivered=newly_delivered,
     )
 
-    logger.info(f"Sending package TTS: {message}")
-
-    media_players = await _get_media_players()
-    if not media_players:
-        logger.warning("No media players configured for TTS")
-        return
-
-    for mp in media_players:
-        entity_id = mp.get("entity_id")
-        if not entity_id:
-            continue
-
-        try:
-            await send_tts(
-                message=message,
-                media_player=entity_id,
-                volume=mp.get("volume", 0.7),
-                tts_entity=mp.get("tts_entity_id", "tts.google_translate_say"),
-                preroll_ms=mp.get("preroll_ms", 0),
-            )
-        except Exception as e:
-            logger.error(f"TTS failed for {entity_id}: {e}")
+    logger.info(f"Sending package TTS ({event_type}): {message}")
+    config = await config_store.load()
+    await dispatch_tts(config, message, event_type)
 
 
 async def trigger_mail_tts(piece_count: int) -> None:
-    """
-    Trigger TTS announcement for mail arrival.
-
-    Args:
-        piece_count: Number of mail pieces.
-    """
+    """Trigger TTS announcement for mail arrival."""
     if not await _should_announce("mail_arrived"):
         logger.debug("TTS skipped for mail_arrived")
         return
@@ -193,24 +148,5 @@ async def trigger_mail_tts(piece_count: int) -> None:
         message = f"You have {piece_count} pieces of mail arriving today."
 
     logger.info(f"Sending mail TTS: {message}")
-
-    media_players = await _get_media_players()
-    if not media_players:
-        logger.warning("No media players configured for TTS")
-        return
-
-    for mp in media_players:
-        entity_id = mp.get("entity_id")
-        if not entity_id:
-            continue
-
-        try:
-            await send_tts(
-                message=message,
-                media_player=entity_id,
-                volume=mp.get("volume", 0.7),
-                tts_entity=mp.get("tts_entity_id", "tts.google_translate_say"),
-                preroll_ms=mp.get("preroll_ms", 0),
-            )
-        except Exception as e:
-            logger.error(f"TTS failed for {entity_id}: {e}")
+    config = await config_store.load()
+    await dispatch_tts(config, message, "mail_arrived")

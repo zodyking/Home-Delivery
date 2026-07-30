@@ -1,12 +1,15 @@
 """
 Adaptive polling scheduler for package tracking.
 Polls hourly by default, every 5 minutes when out for delivery.
+
+USPS is fragile (Akamai): Shipping Label Created → 12h; after movement → 4h.
 """
 from __future__ import annotations
 
 import asyncio
 import hashlib
 import logging
+import re
 from datetime import datetime, timezone, timedelta
 from typing import Any
 
@@ -20,6 +23,11 @@ logger = logging.getLogger(__name__)
 _scheduler_task: asyncio.Task | None = None
 _mail_scheduler_task: asyncio.Task | None = None
 
+# USPS-only cadence (seconds) — avoid hourly Akamai hits on idle labels.
+USPS_LABEL_CREATED_INTERVAL = 12 * 3600  # 12 hours
+USPS_ACTIVE_INTERVAL = 4 * 3600  # 4 hours
+_USPS_LABEL_CREATED_RE = re.compile(r"shipping\s+label\s+created", re.IGNORECASE)
+
 
 def _compute_fingerprint(events: list[dict]) -> str:
     """Compute fingerprint from events for change detection."""
@@ -28,6 +36,53 @@ def _compute_fingerprint(events: list[dict]) -> str:
     latest = events[0]
     data = f"{latest.get('date', '')}{latest.get('description', '')}"
     return hashlib.md5(data.encode()).hexdigest()[:12]
+
+
+def _is_usps_label_created(status: str = "", status_detail: str = "", events: list | None = None) -> bool:
+    """True when USPS is still at the pre-acceptance label-created stage."""
+    blob = f"{status} {status_detail}"
+    if _USPS_LABEL_CREATED_RE.search(blob):
+        return True
+    if events:
+        latest = events[0] if isinstance(events[0], dict) else {}
+        latest_blob = f"{latest.get('status', '')} {latest.get('detail', '')} {latest.get('description', '')}"
+        if _USPS_LABEL_CREATED_RE.search(latest_blob):
+            return True
+    return False
+
+
+def _resolve_poll_interval(
+    package: dict[str, Any],
+    result: dict[str, Any],
+    *,
+    default_interval: int,
+    ofd_interval: int,
+) -> int:
+    """
+    Pick next poll interval from carrier + status.
+
+    USPS special-case (fragile scrape):
+      - Shipping Label Created → 12 hours
+      - After status moves on → 4 hours (until out-for-delivery / delivered rules)
+    """
+    carrier = (result.get("carrier") or package.get("carrier") or "").lower()
+    is_delivered = bool(result.get("delivered", package.get("delivered", False)))
+    is_ofd = bool(result.get("out_for_delivery", package.get("out_for_delivery", False)))
+
+    if is_delivered:
+        return default_interval * 2
+    if is_ofd:
+        return ofd_interval
+
+    if carrier == "usps":
+        status = (result.get("status") or package.get("status") or "").strip()
+        detail = (result.get("status_detail") or package.get("status_detail") or "").strip()
+        events = result.get("events") if result.get("events") is not None else package.get("events")
+        if _is_usps_label_created(status, detail, events if isinstance(events, list) else None):
+            return USPS_LABEL_CREATED_INTERVAL
+        return USPS_ACTIVE_INTERVAL
+
+    return default_interval
 
 
 async def _poll_package(package: dict[str, Any]) -> dict[str, Any] | None:
@@ -76,24 +131,31 @@ async def _poll_package(package: dict[str, Any]) -> dict[str, Any] | None:
         newly_ofd = is_ofd and not was_ofd
         newly_delivered = is_delivered and not was_delivered
 
-        # Determine next poll interval
+        # Determine next poll interval (USPS uses a gentler cadence)
         config = await config_store.load()
         polling = config.get("polling", {})
         default_interval = polling.get("default_interval_seconds", 3600)
         ofd_interval = polling.get("out_for_delivery_interval_seconds", 300)
-
-        if is_delivered:
-            # Delivered packages poll less frequently
-            interval = default_interval * 2
-        elif is_ofd:
-            # Out for delivery gets fast polling
-            interval = ofd_interval
-        else:
-            interval = default_interval
+        interval = _resolve_poll_interval(
+            package,
+            result,
+            default_interval=default_interval,
+            ofd_interval=ofd_interval,
+        )
 
         now = datetime.now(timezone.utc)
         result["poll_interval_seconds"] = interval
         result["next_poll_at"] = (now + timedelta(seconds=interval)).isoformat()
+
+        carrier = (result.get("carrier") or package.get("carrier") or "").lower()
+        if carrier == "usps":
+            logger.info(
+                "USPS next poll for %s in %sh (status=%r detail=%r)",
+                tracking,
+                interval / 3600,
+                result.get("status") or package.get("status"),
+                result.get("status_detail") or package.get("status_detail"),
+            )
 
         # Update package in storage
         await config_store.update_package(pkg_id, result)
@@ -112,9 +174,20 @@ async def _poll_package(package: dict[str, Any]) -> dict[str, Any] | None:
 
     except Exception as e:
         logger.error(f"Error polling {tracking}: {e}")
+        now = datetime.now(timezone.utc)
+        config = await config_store.load()
+        polling = config.get("polling", {})
+        interval = _resolve_poll_interval(
+            package,
+            {"error": str(e)},
+            default_interval=polling.get("default_interval_seconds", 3600),
+            ofd_interval=polling.get("out_for_delivery_interval_seconds", 300),
+        )
         await config_store.update_package(pkg_id, {
             "error": str(e),
-            "last_polled": datetime.now(timezone.utc).isoformat(),
+            "last_polled": now.isoformat(),
+            "poll_interval_seconds": interval,
+            "next_poll_at": (now + timedelta(seconds=interval)).isoformat(),
         })
         return None
 

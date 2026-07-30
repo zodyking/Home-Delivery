@@ -12,10 +12,9 @@ from datetime import datetime, timezone
 from typing import Any
 
 from carrier_detect import (
-    CARRIERS,
     CarrierType,
+    auto_detect_carrier_order,
     get_tracking_url,
-    infer_carrier_from_format,
     normalize_tracking_number,
 )
 
@@ -80,15 +79,19 @@ async def _fetch_ups(page, tracking_number: str) -> dict[str, Any]:
 
 async def _fetch_fedex(page, tracking_number: str) -> dict[str, Any]:
     """Fetch FedEx tracking data from a ready page (stub for now)."""
+    _ = page, tracking_number
     return {"error": "FedEx scraping not yet implemented"}
 
 
 async def _fetch_estes(page, tracking_number: str) -> dict[str, Any]:
     """Fetch Estes Express tracking data from My Estes shipment tracking."""
-    url = get_tracking_url("estes", tracking_number)
-    await goto_tracking_page(page, url, timeout_ms=60000)
+    from .navigation import prepare_estes_tracking_page
 
-    state = await wait_for_estes_tracking(page, timeout_ms=45000)
+    url = get_tracking_url("estes", tracking_number)
+    await goto_tracking_page(page, url, timeout_ms=45000)
+    await prepare_estes_tracking_page(page, tracking_number)
+
+    state = await wait_for_estes_tracking(page, timeout_ms=25000)
     if state == "not_found":
         return {"error": "Not found or tracking information unavailable"}
     if state != "ready":
@@ -133,6 +136,10 @@ async def fetch_carrier_tracking(
         return {"error": f"Unknown carrier: {carrier}"}
 
     logger.info("Fetching %s tracking for %s", carrier.upper(), normalized)
+
+    # Don't launch a browser for unimplemented carriers (FedEx stub).
+    if carrier == "fedex":
+        return await fetch_fn(None, normalized)
 
     async def _do_fetch() -> dict[str, Any]:
         async with get_page(timeout_ms=70000) as page:
@@ -208,35 +215,26 @@ async def fetch_tracking_auto(
     """
     Auto-detect carrier by attempting to fetch tracking data.
 
-    Tries carriers in order: format-inferred carrier first, then others.
-    Returns as soon as a carrier yields at least one tracking event.
+    Tries carriers one at a time until one returns real tracking data.
+    Unambiguous formats (1Z → UPS, 10-digit → Estes, long IMpb → USPS) only
+    try that carrier so a miss never surfaces as another carrier's error.
 
     Args:
         tracking_number: The tracking number.
 
     Returns:
         Tuple of (carrier, result). Carrier is None if no carrier returned events.
-        Result contains either successful tracking data or the last error.
     """
     normalized = normalize_tracking_number(tracking_number)
     if not normalized:
         return None, {"error": "Invalid tracking number"}
 
-    # Build try order: format hint first, then remaining carriers
-    hinted = infer_carrier_from_format(normalized)
-    try_order: list[CarrierType] = []
-
-    if hinted:
-        try_order.append(hinted)
-        logger.info(
-            "Format inference suggests %s for %s, trying first",
-            hinted.upper(),
-            normalized,
-        )
-
-    for carrier in CARRIERS:
-        if carrier not in try_order:
-            try_order.append(carrier)
+    try_order = auto_detect_carrier_order(normalized)
+    logger.info(
+        "Auto-detect order for %s: %s",
+        normalized,
+        " → ".join(c.upper() for c in try_order),
+    )
 
     last_error: dict[str, Any] = {"error": "No carrier returned tracking events"}
 
@@ -245,8 +243,8 @@ async def fetch_tracking_auto(
 
         if result.get("error"):
             last_error = result
-            logger.debug(
-                "%s fetch returned error for %s: %s",
+            logger.info(
+                "%s did not match %s (%s); trying next",
                 carrier.upper(),
                 normalized,
                 result.get("error"),
@@ -263,9 +261,8 @@ async def fetch_tracking_auto(
             )
             return carrier, result
 
-        # No events but no error — might be "label created" with empty history
-        # Still counts as a successful carrier detection if status is set
-        status = result.get("status", "").lower()
+        # No events but no error — meaningful status still confirms carrier
+        status = (result.get("status") or "").lower()
         if status and status not in ("unknown", "pending", ""):
             logger.info(
                 "Carrier confirmed via scrape (no events, status=%s): %s for %s",
@@ -275,12 +272,24 @@ async def fetch_tracking_auto(
             )
             return carrier, result
 
-        logger.debug(
-            "%s returned no events and no meaningful status for %s",
+        logger.info(
+            "%s returned no events/status for %s; trying next",
             carrier.upper(),
             normalized,
         )
         last_error = {"error": f"{carrier.upper()} page loaded but no tracking data found"}
 
-    logger.warning("No carrier returned tracking events for %s", normalized)
-    return None, last_error
+    logger.warning(
+        "No carrier returned tracking events for %s (last=%s)",
+        normalized,
+        last_error.get("error"),
+    )
+    # Never leak a single-carrier miss (e.g. Estes) as the user-facing error
+    # after a multi-carrier probe — that looks like the wrong carrier won.
+    return None, {
+        "error": (
+            "Could not determine carrier for this tracking number. "
+            "Check the number and try again."
+        ),
+        "last_carrier_error": last_error.get("error"),
+    }

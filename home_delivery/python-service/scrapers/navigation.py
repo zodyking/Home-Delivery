@@ -254,7 +254,88 @@ async def wait_for_fedex_tracking(page: Page, timeout_ms: int = 25000) -> bool:
         return False
 
 
-async def wait_for_estes_tracking(page: Page, timeout_ms: int = 45000) -> str:
+async def dismiss_estes_overlays(page: Page) -> None:
+    """Dismiss cookie / consent banners that block Search."""
+    # Prefer the Termly/alertdialog Accept before generic page buttons.
+    for locator_factory in (
+        lambda: page.get_by_role("alertdialog").get_by_role("button", name="Accept"),
+        lambda: page.get_by_role("dialog").get_by_role("button", name="Accept"),
+        lambda: page.locator('button:has-text("Accept All")'),
+        lambda: page.locator("#onetrust-accept-btn-handler"),
+        lambda: page.locator('button:has-text("Accept")'),
+    ):
+        try:
+            loc = locator_factory()
+            if await loc.count() == 0:
+                continue
+            await loc.first.click(timeout=2000, force=True)
+            await page.wait_for_timeout(250)
+            return
+        except Exception:
+            continue
+
+
+async def prepare_estes_tracking_page(page: Page, tracking_number: str) -> None:
+    """
+    Cookie consent + explicit Search.
+
+    Deep-link query params fill the form but do not always auto-run Search;
+    without clicking Search the scraper waits until timeout.
+    """
+    from carrier_detect import format_tracking_for_url
+
+    await dismiss_estes_overlays(page)
+
+    pro = format_tracking_for_url("estes", tracking_number)
+    try:
+        box = page.locator(
+            'textarea[formcontrolname], textarea, '
+            'textbox:has-text("tracking"), '
+            'textarea[placeholder*="tracking" i]'
+        ).first
+        # Material textarea used by My Estes
+        mat_box = page.locator("textarea").first
+        target = mat_box if await mat_box.count() > 0 else box
+        if await target.count() > 0:
+            current = (await target.input_value()).strip()
+            if not current:
+                await target.fill(pro)
+            elif tracking_number.replace("-", "") not in current.replace("-", ""):
+                await target.fill(pro)
+    except Exception as exc:
+        logger.debug("Estes tracking input fill skipped: %s", exc)
+
+    # Click Search — required; querystring alone often leaves an empty results pane.
+    clicked = False
+    for selector in (
+        'button:has-text("Search")',
+        'button.mat-mdc-raised-button:has-text("Search")',
+        'button[type="submit"]',
+    ):
+        loc = page.locator(selector)
+        try:
+            if await loc.count() == 0:
+                continue
+            await loc.first.click(timeout=4000)
+            clicked = True
+            break
+        except Exception:
+            continue
+
+    if not clicked:
+        # Fallback: submit the tracking form via Enter
+        try:
+            await page.locator("textarea").first.press("Enter")
+            clicked = True
+        except Exception:
+            pass
+
+    if clicked:
+        logger.info("Estes Search submitted for %s", pro)
+        await page.wait_for_timeout(400)
+
+
+async def wait_for_estes_tracking(page: Page, timeout_ms: int = 25000) -> str:
     """
     Wait for Estes tracking results or a not-found error.
 
@@ -263,26 +344,43 @@ async def wait_for_estes_tracking(page: Page, timeout_ms: int = 45000) -> str:
         "not_found" when the red unavailable banner appears,
         "timeout" if neither appears in time.
     """
+    not_found_re = "Not found or tracking information unavailable"
     deadline = time.monotonic() + (timeout_ms / 1000)
-    not_found_re = "not found or tracking information unavailable"
 
     while time.monotonic() < deadline:
-        content = (await page.content()).lower()
-        if not_found_re in content:
-            return "not_found"
+        # Prefer cheap locator checks over full HTML dumps each loop.
+        try:
+            if await page.get_by_text(not_found_re, exact=False).count() > 0:
+                return "not_found"
+        except Exception:
+            pass
 
         ready = await page.locator(
             "app-tracking-results .mat-column-status, "
-            "app-tracking-results .mat-mdc-row, "
+            "app-tracking-results .mat-mdc-row:not(.detail-row), "
             "td.mat-column-status, "
-            ".tbl-header-status"
+            ".tbl-header-status, "
+            "app-tracking-results"
         ).count() > 0
-        if ready:
+
+        # app-tracking-results can exist empty before Search — require status text/row.
+        has_status = await page.locator(
+            "td.mat-column-status, .tbl-header-status, "
+            "app-tracking-results .mat-mdc-row:not(.detail-row)"
+        ).count() > 0
+
+        if has_status:
             return "ready"
 
-        await page.wait_for_timeout(500)
+        # Also treat a visible PRO in results table as ready.
+        if ready and await page.locator("td.mat-column-proNumber, .cdk-column-proNumber").count() > 0:
+            return "ready"
 
-    content = (await page.content()).lower()
-    if not_found_re in content:
-        return "not_found"
+        await page.wait_for_timeout(250)
+
+    try:
+        if await page.get_by_text(not_found_re, exact=False).count() > 0:
+            return "not_found"
+    except Exception:
+        pass
     return "timeout"

@@ -31,7 +31,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Code version for deployment verification
-CODE_VERSION = "0.0.13"
+CODE_VERSION = "0.0.14"
 
 app = FastAPI(title="Home Delivery API")
 
@@ -114,8 +114,9 @@ class ConfigUpdate(BaseModel):
 
 
 class TTSTestRequest(BaseModel):
-    message: str
+    message: str = "This is a Home Delivery test announcement."
     media_player: str | None = None
+    type_id: str | None = None
 
 
 class MailImapTestRequest(BaseModel):
@@ -281,6 +282,19 @@ async def add_package(pkg: PackageCreate):
         }
 
     # Build package with scraped data
+    from datetime import timedelta
+
+    from polling_scheduler import _resolve_poll_interval
+
+    config = await config_store.load()
+    polling = config.get("polling", {})
+    poll_interval = _resolve_poll_interval(
+        {"carrier": carrier},
+        scrape_result if isinstance(scrape_result, dict) else {},
+        default_interval=polling.get("default_interval_seconds", 3600),
+        ofd_interval=polling.get("out_for_delivery_interval_seconds", 300),
+    )
+    now = utc_now()
     package = {
         "id": str(uuid.uuid4()),
         "tracking_number": normalized,
@@ -295,10 +309,10 @@ async def add_package(pkg: PackageCreate):
         "last_event_fingerprint": scrape_result.get("last_event_fingerprint"),
         "out_for_delivery": scrape_result.get("out_for_delivery", False),
         "delivered": scrape_result.get("delivered", False),
-        "created_at": utc_now_iso(),
-        "last_polled": scrape_result.get("last_polled") or utc_now_iso(),
-        "next_poll_at": utc_now_iso(),
-        "poll_interval_seconds": 3600,
+        "created_at": now.isoformat(),
+        "last_polled": scrape_result.get("last_polled") or now.isoformat(),
+        "next_poll_at": (now + timedelta(seconds=poll_interval)).isoformat(),
+        "poll_interval_seconds": poll_interval,
         "error": scrape_result.get("error"),
     }
 
@@ -797,38 +811,59 @@ async def get_ha_entities():
 
 @app.post("/api/test-tts")
 async def test_tts(request: TTSTestRequest):
-    """Send a test TTS announcement."""
+    """Send a test TTS announcement (single player, type-resolved, or all configured)."""
     try:
-        from tts_engine import send_tts
+        from tts_engine import apply_message_prefix, dispatch_tts, send_tts
+
         config = await config_store.load()
         media_players = config.get("media_players", [])
 
         if not media_players:
             raise HTTPException(status_code=400, detail="No media players configured")
 
-        # Use specified player or first configured
-        target_player = request.media_player
-        if not target_player:
-            target_player = media_players[0].get("entity_id")
+        raw_message = request.message or "This is a Home Delivery test announcement."
 
-        player_config = None
-        for mp in media_players:
-            if mp.get("entity_id") == target_player:
-                player_config = mp
-                break
+        # Per message-type test: honor skip/volume overrides + prefix
+        if request.type_id:
+            sent = await dispatch_tts(config, raw_message, request.type_id)
+            if sent == 0:
+                raise HTTPException(
+                    status_code=400,
+                    detail="No eligible media players for this message type (all skipped or missing TTS entity)",
+                )
+            return {"success": True, "sent": sent}
 
-        if not player_config:
-            player_config = {"entity_id": target_player, "volume": 0.7}
+        message = apply_message_prefix(config, raw_message)
+        targets = media_players
+        if request.media_player:
+            targets = [mp for mp in media_players if mp.get("entity_id") == request.media_player]
+            if not targets:
+                raise HTTPException(status_code=400, detail="Media player not found in settings")
 
-        await send_tts(
-            message=request.message,
-            media_player=player_config.get("entity_id"),
-            volume=player_config.get("volume", 0.7),
-            tts_entity=player_config.get("tts_entity_id", "tts.google_translate_say"),
-        )
+        sent = 0
+        for player_config in targets:
+            entity_id = player_config.get("entity_id")
+            if not entity_id or not player_config.get("tts_entity_id"):
+                continue
+            ok = await send_tts(
+                message=message,
+                media_player=entity_id,
+                volume=float(player_config.get("volume", 0.6)),
+                tts_entity=player_config.get("tts_entity_id", "tts.google_translate_say"),
+                language=player_config.get("language") or "",
+                preroll_ms=int(player_config.get("preroll_ms") or 0),
+                cache=bool(player_config.get("cache", True)),
+            )
+            if ok:
+                sent += 1
 
-        return {"success": True}
+        if sent == 0:
+            raise HTTPException(status_code=400, detail="No playable media players (need TTS entity)")
 
+        return {"success": True, "sent": sent}
+
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"TTS test failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))

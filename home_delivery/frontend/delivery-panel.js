@@ -2,7 +2,7 @@
  * Home Delivery Panel - Vanilla JS for HA custom panel / standalone Ingress
  * Design aligned with home-weather: topbar + gear settings, dashboard layout.
  */
-const PANEL_VERSION = "0.0.13";
+const PANEL_VERSION = "0.0.14";
 
 class HomeDeliveryPanel extends HTMLElement {
   constructor() {
@@ -37,6 +37,7 @@ class HomeDeliveryPanel extends HTMLElement {
     this._historyLoading = false;
     this._historySelectedDate = null;
     this._historyMonth = null; // Date at first of visible month
+    this._expandedSections = new Set(["general", "media-players"]);
   }
 
   get _isNarrow() {
@@ -304,6 +305,13 @@ class HomeDeliveryPanel extends HTMLElement {
       this._config = configResp.config || {};
       this._settings = JSON.parse(JSON.stringify(this._config));
       this._normalizeMailSettings(this._settings);
+      if (!Array.isArray(this._settings.media_players)) this._settings.media_players = [];
+      if (!this._settings.announcement_players || typeof this._settings.announcement_players !== "object") {
+        this._settings.announcement_players = {};
+      }
+      if (typeof this._settings.message_prefix !== "string") {
+        this._settings.message_prefix = "Home Delivery update";
+      }
       this._packages = packagesResp.packages || [];
       this._mailState = mailResp;
       this._mediaPlayers = entitiesResp.media_players || [];
@@ -640,6 +648,7 @@ class HomeDeliveryPanel extends HTMLElement {
       // Legacy mail form — accounts are managed directly in _settings.mail.accounts
     }
 
+    if (!this._settings.tts) this._settings.tts = {};
     const ttsEnabled = s.querySelector("#tts-enabled");
     const ttsStatusChange = s.querySelector("#tts-status-change");
     const ttsOutForDelivery = s.querySelector("#tts-out-for-delivery");
@@ -648,7 +657,6 @@ class HomeDeliveryPanel extends HTMLElement {
     const ttsStartTime = s.querySelector("#tts-start-time");
     const ttsEndTime = s.querySelector("#tts-end-time");
 
-    if (!this._settings.tts) this._settings.tts = {};
     if (ttsEnabled) this._settings.tts.enabled = ttsEnabled.checked;
     if (ttsStatusChange) this._settings.tts.enable_status_change = ttsStatusChange.checked;
     if (ttsOutForDelivery) this._settings.tts.enable_out_for_delivery = ttsOutForDelivery.checked;
@@ -657,12 +665,68 @@ class HomeDeliveryPanel extends HTMLElement {
     if (ttsStartTime) this._settings.tts.start_time = ttsStartTime.value;
     if (ttsEndTime) this._settings.tts.end_time = ttsEndTime.value;
 
+    const messagePrefix = s.querySelector("#message-prefix");
+    if (messagePrefix) {
+      this._settings.message_prefix = messagePrefix.value || "Home Delivery update";
+    }
+
+    const cards = s.querySelectorAll("#media-player-list .media-player-card");
+    if (cards.length || s.querySelector("#media-player-list")) {
+      this._settings.media_players = Array.from(cards).map((card) => {
+        const entitySel = card.querySelector(".media-player-select");
+        const ttsSel = card.querySelector(".media-player-tts-entity");
+        const volumeSlider = card.querySelector(".media-player-volume");
+        const prerollInput = card.querySelector(".media-player-preroll");
+        const cacheChk = card.querySelector(".media-player-cache");
+        const langInput = card.querySelector(".media-player-language");
+        const optionsInput = card.querySelector(".media-player-options");
+        let options = {};
+        if (optionsInput?.value) {
+          try { options = JSON.parse(optionsInput.value); } catch (_) {}
+        }
+        return {
+          entity_id: entitySel?.value || "",
+          tts_entity_id: ttsSel?.value || "",
+          volume: parseFloat(volumeSlider?.value || 0.6),
+          preroll_ms: parseInt(prerollInput?.value || 150, 10),
+          cache: !!cacheChk?.checked,
+          language: (langInput?.value || "").trim(),
+          options,
+        };
+      }).filter((m) => m.entity_id);
+    }
+
+    this._settings.announcement_players = this._collectAnnouncementPlayers();
+
     const defaultInterval = s.querySelector("#polling-default");
     const ofdInterval = s.querySelector("#polling-ofd");
 
     if (!this._settings.polling) this._settings.polling = {};
     if (defaultInterval) this._settings.polling.default_interval_seconds = parseInt(defaultInterval.value) || 3600;
     if (ofdInterval) this._settings.polling.out_for_delivery_interval_seconds = parseInt(ofdInterval.value) || 300;
+  }
+
+  _collectAnnouncementPlayers() {
+    const s = this.shadowRoot;
+    if (!s) return this._settings.announcement_players || {};
+
+    const result = { ...(this._settings.announcement_players || {}) };
+    s.querySelectorAll(".per-speaker-list").forEach((list) => {
+      const typeId = list.dataset.typeId;
+      if (!typeId) return;
+      if (!result[typeId]) result[typeId] = {};
+      list.querySelectorAll(".per-speaker-row").forEach((row) => {
+        const entityId = row.dataset.entityId;
+        if (!entityId) return;
+        const volumeInput = row.querySelector(".per-speaker-volume");
+        const bypassInput = row.querySelector(".per-speaker-bypass-input");
+        result[typeId][entityId] = {
+          volume: parseFloat(volumeInput?.value ?? 0.6),
+          bypass: bypassInput?.checked ?? false,
+        };
+      });
+    });
+    return result;
   }
 
   // ============================================================================
@@ -674,6 +738,77 @@ class HomeDeliveryPanel extends HTMLElement {
     return slug || "unknown";
   }
 
+  _carrierMeta(carrier) {
+    const key = this._carrierClass(carrier);
+    const catalog = {
+      usps: {
+        label: "USPS",
+        service: "USPS Ground Advantage",
+        className: "Parcel Select",
+        subtitle: "Package Tracking Service",
+        logoLocal: "usps.svg",
+        logoRemote: "",
+      },
+      ups: {
+        label: "UPS",
+        service: "UPS Ground",
+        className: "Package",
+        subtitle: "Package Tracking Service",
+        logoLocal: "ups.svg",
+        logoRemote: "https://www.ups.com/assets/resources/webcontent/images/ups-logo.svg",
+      },
+      fedex: {
+        label: "FedEx",
+        service: "FedEx Ground",
+        className: "Express",
+        subtitle: "Package Tracking Service",
+        logoLocal: "fedex.svg",
+        logoRemote: "https://upload.wikimedia.org/wikipedia/commons/9/9d/FedEx_Corporation_-_2016_Logo.svg",
+      },
+      estes: {
+        label: "Estes",
+        service: "Estes LTL Freight",
+        className: "Freight",
+        subtitle: "Shipment Tracking Service",
+        logoLocal: "estes.svg",
+        logoRemote: "https://upload.wikimedia.org/wikipedia/commons/8/8a/Estes_Express_Lines_logo.svg",
+      },
+    };
+    return catalog[key] || {
+      label: (carrier || "?").toString().toUpperCase(),
+      service: "Carrier Tracking",
+      className: "Package",
+      subtitle: "Package Tracking Service",
+      logoLocal: null,
+      logoRemote: null,
+    };
+  }
+
+  _carrierLogoHtml(carrier) {
+    const meta = this._carrierMeta(carrier);
+    const local = meta.logoLocal
+      ? this._apiUrl(`/assets/carriers/${meta.logoLocal}`)
+      : "";
+    // Prefer bundled asset for HA/offline; fall back to Wikimedia remote, then text.
+    const src = local || meta.logoRemote || "";
+    const remoteFallback = local && meta.logoRemote ? meta.logoRemote : "";
+    if (!src) {
+      return `<span class="carrier-logo-text">${this._esc(meta.label)}</span>`;
+    }
+    return `
+      <img
+        class="carrier-logo-img carrier-logo-${this._carrierClass(carrier)}"
+        src="${this._esc(src)}"
+        alt="${this._esc(meta.label)}"
+        loading="lazy"
+        decoding="async"
+        data-remote="${this._esc(remoteFallback)}"
+        onerror="if(this.dataset.remote){this.src=this.dataset.remote;this.removeAttribute('data-remote');}else{this.style.display='none';const t=this.nextElementSibling;if(t)t.hidden=false;}"
+      />
+      <span class="carrier-logo-text" hidden>${this._esc(meta.label)}</span>
+    `;
+  }
+
   _carrierBadge(carrier) {
     const colors = {
       usps: { bg: "#004B87", text: "#fff", label: "USPS" },
@@ -681,8 +816,60 @@ class HomeDeliveryPanel extends HTMLElement {
       fedex: { bg: "#4D148C", text: "#FF6600", label: "FedEx" },
       estes: { bg: "#111111", text: "#FFD200", label: "Estes" },
     };
-    const c = colors[carrier] || { bg: "#666", text: "#fff", label: carrier?.toUpperCase() || "?" };
+    const key = this._carrierClass(carrier);
+    const c = colors[key] || { bg: "#666", text: "#fff", label: carrier?.toUpperCase() || "?" };
     return `<span class="carrier-badge" style="background:${c.bg};color:${c.text}">${c.label}</span>`;
+  }
+
+  _formatTrackingDisplay(tracking) {
+    const digits = String(tracking || "").replace(/\s+/g, "");
+    if (!digits) return "";
+    // Group into readable barcode-style chunks.
+    return digits.replace(/(.{4})/g, "$1 ").trim();
+  }
+
+  _packageRouteCode(destination, recipient) {
+    const dest = String(destination || "");
+    const apt = dest.match(/\b(?:APT|APARTMENT|UNIT|#)\s*([A-Z0-9-]+)\b/i);
+    if (apt?.[1]) return apt[1].toUpperCase().slice(0, 4);
+    const zip = dest.match(/\b(\d{5})(?:-\d{4})?\b/);
+    if (zip?.[1]) return zip[1].slice(-3);
+    const name = String(recipient || "").trim();
+    if (name) return name.slice(0, 2).toUpperCase();
+    return "—";
+  }
+
+  _packageAddressLines(destination) {
+    const raw = String(destination || "").trim();
+    if (!raw) return ["Address pending"];
+    const parts = raw
+      .split(/\n+|,\s*(?=[A-Za-z0-9])/)
+      .map((p) => p.trim())
+      .filter(Boolean);
+    return parts.length ? parts : [raw];
+  }
+
+  _eventRegionCode(location) {
+    const loc = String(location || "").toUpperCase();
+    const state = loc.match(/\b([A-Z]{2})\b(?=\s*\d{5}|\s*$|,)/);
+    if (state?.[1] && !["US", "OF", "AM", "PM"].includes(state[1])) return state[1];
+    const city = loc.split(",")[0]?.trim();
+    if (city) return city.slice(0, 3);
+    return "—";
+  }
+
+  _barcodeStyle(tracking) {
+    // Deterministic faux barcode from tracking digits (visual only).
+    const s = String(tracking || "HOMEDELIVERY");
+    const stops = [];
+    let x = 0;
+    for (let i = 0; i < 48 && x < 100; i++) {
+      const n = s.charCodeAt(i % s.length) + i * 7;
+      const bar = 0.8 + (n % 3) * 0.7;
+      stops.push(`#111 ${x.toFixed(2)}% ${(x + bar).toFixed(2)}%`);
+      x += bar + 0.7 + (n % 2) * 0.5;
+    }
+    return `linear-gradient(90deg, ${stops.join(", ")}, transparent)`;
   }
 
   _statusClass(pkg) {
@@ -1445,37 +1632,63 @@ class HomeDeliveryPanel extends HTMLElement {
     `;
   }
 
+  _historyDayTitle(dateKey) {
+    if (!dateKey) return "Mail History";
+    return new Date(`${dateKey}T12:00:00`).toLocaleDateString(undefined, {
+      weekday: "short", month: "short", day: "numeric", year: "numeric",
+    });
+  }
+
   _renderHistoryMenubar() {
+    const viewingDay = !!this._historySelectedDate;
     const backLabel = "Back";
+    const title = viewingDay ? this._historyDayTitle(this._historySelectedDate) : "Mail History";
+    const backAction = viewingDay ? "history-back-calendar" : "nav-back";
     const embeddedNarrow = this._isHaEmbedded() && this._isNarrow;
     if (embeddedNarrow) {
       return `
         <header class="topbar topbar--embedded-overlay topbar--settings-overlay">
-          <button type="button" class="hd-menubar-back hd-menubar-back--compact" data-action="nav-back" aria-label="${backLabel}">
+          <button type="button" class="hd-menubar-back hd-menubar-back--compact" data-action="${backAction}" aria-label="${backLabel}">
             <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z"/></svg>
           </button>
           <div class="topbar-spacer" aria-hidden="true"></div>
-          <button type="button" class="btn-link" data-action="sync-history" ${this._historyLoading || this._mailSyncing ? "disabled" : ""}>
-            ${this._historyLoading || this._mailSyncing ? "Loading…" : "Refresh"}
-          </button>
+          ${viewingDay ? "" : `
+            <button type="button" class="btn-link" data-action="sync-history" ${this._historyLoading || this._mailSyncing ? "disabled" : ""}>
+              ${this._historyLoading || this._mailSyncing ? "Loading…" : "Refresh"}
+            </button>
+          `}
         </header>
       `;
     }
     return `
       <header class="hd-menubar">
-        <button type="button" class="hd-menubar-back" data-action="nav-back" aria-label="${backLabel}">
+        <button type="button" class="hd-menubar-back" data-action="${backAction}" aria-label="${backLabel}">
           <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z"/></svg>
           <span>${backLabel}</span>
         </button>
-        <div class="hd-menubar-title">Mail History</div>
-        <button type="button" class="btn-link" data-action="sync-history" ${this._historyLoading || this._mailSyncing ? "disabled" : ""}>
-          ${this._historyLoading || this._mailSyncing ? "Loading…" : "Refresh 30 days"}
-        </button>
+        <div class="hd-menubar-title">${this._esc(title)}</div>
+        ${viewingDay ? `<div class="hd-menubar-spacer" aria-hidden="true"></div>` : `
+          <button type="button" class="btn-link" data-action="sync-history" ${this._historyLoading || this._mailSyncing ? "disabled" : ""}>
+            ${this._historyLoading || this._mailSyncing ? "Loading…" : "Refresh 30 days"}
+          </button>
+        `}
       </header>
     `;
   }
 
   _renderHistoryContent() {
+    if (this._historySelectedDate) {
+      const day = this._historyDayMap()[this._historySelectedDate]
+        || { date: this._historySelectedDate, mailpiece_count: 0, package_count: 0, letters: [] };
+      return `
+        <div class="history-view history-view--day">
+          <div class="history-day-full card glass">
+            ${this._renderHistoryDayDetail(day)}
+          </div>
+        </div>
+      `;
+    }
+
     const month = this._historyMonth || new Date(new Date().getFullYear(), new Date().getMonth(), 1);
     const year = month.getFullYear();
     const monthIndex = month.getMonth();
@@ -1483,7 +1696,6 @@ class HomeDeliveryPanel extends HTMLElement {
     const firstDow = new Date(year, monthIndex, 1).getDay();
     const daysInMonth = new Date(year, monthIndex + 1, 0).getDate();
     const dayMap = this._historyDayMap();
-    const selected = this._historySelectedDate ? dayMap[this._historySelectedDate] : null;
 
     const cells = [];
     for (let i = 0; i < firstDow; i++) cells.push(`<div class="hist-cell hist-cell--empty"></div>`);
@@ -1492,10 +1704,9 @@ class HomeDeliveryPanel extends HTMLElement {
       const entry = dayMap[dateKey];
       const mailN = entry?.mailpiece_count || 0;
       const pkgN = entry?.package_count || 0;
-      const active = this._historySelectedDate === dateKey;
       const hasData = !!(entry && (mailN || pkgN || (entry.letters || []).length));
       cells.push(`
-        <button type="button" class="hist-cell ${hasData ? "has-data" : ""} ${active ? "active" : ""}"
+        <button type="button" class="hist-cell ${hasData ? "has-data" : ""}"
           data-action="select-history-day" data-date="${dateKey}" ${hasData ? "" : "disabled"}>
           <span class="hist-daynum">${day}</span>
           ${hasData ? `
@@ -1509,7 +1720,7 @@ class HomeDeliveryPanel extends HTMLElement {
     }
 
     return `
-      <div class="history-view">
+      <div class="history-view history-view--calendar">
         <div class="history-calendar card glass">
           <div class="history-cal-head">
             <button type="button" class="btn-link" data-action="history-prev-month" aria-label="Previous month">‹</button>
@@ -1524,15 +1735,7 @@ class HomeDeliveryPanel extends HTMLElement {
               ? `<div class="history-loading">Loading history…</div>`
               : cells.join("")}
           </div>
-          <p class="hint history-legend">m = mailpieces · p = inbound packages</p>
-        </div>
-        <div class="history-detail card glass">
-          ${selected ? this._renderHistoryDayDetail(selected) : `
-            <div class="history-detail-empty">
-              <p>Select a day to view letters</p>
-              <p class="hint">Sync inbox or add an address to load up to 30 days of Informed Delivery.</p>
-            </div>
-          `}
+          <p class="hint history-legend">m = mailpieces · p = inbound packages · tap a day for letters</p>
         </div>
       </div>
     `;
@@ -1645,58 +1848,117 @@ class HomeDeliveryPanel extends HTMLElement {
     const destination = (pkg.destination || "").trim();
     const detail = (pkg.status_detail || "").trim();
     const latest = pkg.events?.[0];
+    const carrierKey = this._carrierClass(pkg.carrier);
+    const meta = this._carrierMeta(pkg.carrier);
+    const tracking = String(pkg.tracking_number || "");
+    const trackingSpaced = this._formatTrackingDisplay(tracking);
+    const routeCode = this._packageRouteCode(destination, forName);
+    const addressLines = this._packageAddressLines(destination);
+    const recipientDisplay = forName || (needsDetails ? "Add recipient" : "Someone");
+    const eventTitle = detail || statusLabel || "Status update";
+    const eventCode = this._eventRegionCode(latest?.location);
+    const eventCodeLabel = latest?.location ? "Origin Facility" : "Awaiting Scan";
+    const eventDate = latest?.date || "";
+    const eventTime = latest?.time || "";
+    const eventWhen = [eventDate, eventTime].filter(Boolean).join(eventDate && eventTime ? " at " : "");
+    const eventLocation = (latest?.location || "").trim();
+    const sourceLine = pkg.auto_discovered
+      ? "Source: Informed Delivery"
+      : (pkg.error ? `Error: ${pkg.error}` : "");
+    const barcodeBg = this._barcodeStyle(tracking);
 
     return `
-      <div class="package-card ${statusClass} carrier-${this._carrierClass(pkg.carrier)}${needsDetails ? " needs-details" : ""}${pkg.delivered ? " is-delivered" : ""}" data-package-id="${pkg.id}">
-        <div class="pkg-card-top">
-          <div class="pkg-for-block">
-            <span class="pkg-for-label">For</span>
-            <span class="pkg-for-name ${forName ? "" : "is-empty"}">${this._esc(forName || (needsDetails ? "Add recipient" : "Someone"))}</span>
-            ${destination ? `<span class="pkg-for-dest">${this._esc(destination)}</span>` : ""}
-          </div>
-          <div class="pkg-status-chip ${statusClass}" title="${this._esc(detail || statusLabel)}">
-            <span class="pkg-status-dot" aria-hidden="true"></span>
-            ${this._esc(statusLabel)}
-          </div>
-        </div>
+      <article class="package-card ${statusClass} carrier-${carrierKey}${needsDetails ? " needs-details" : ""}${pkg.delivered ? " is-delivered" : ""}" data-package-id="${pkg.id}">
+        <section class="pkg-label">
+          <header class="label-header">
+            <div class="carrier-logo">
+              ${this._carrierLogoHtml(pkg.carrier)}
+            </div>
+            <div class="service-block">
+              <strong>${this._esc(meta.service)}</strong>
+              <span>${this._esc(meta.subtitle)}</span>
+            </div>
+            <div class="route-code" title="Route / unit">${this._esc(routeCode)}</div>
+          </header>
 
-        <div class="pkg-card-mid">
-          ${this._carrierBadge(pkg.carrier)}
-          <span class="package-tracking" title="${this._esc(pkg.tracking_number)}">${this._esc(pkg.tracking_number)}</span>
-          ${needsDetails ? `
-            <span class="discover-badge" title="Found in USPS Informed Delivery — add who it's for and where">
-              <span class="discover-ping" aria-hidden="true"></span>
-              Auto discovered
-            </span>
-          ` : ""}
-          ${pkg.delivered ? `<span class="delivered-mark">Delivered</span>` : ""}
-        </div>
+          <section class="label-meta">
+            <div class="tracking-summary">
+              <div class="small-label">Tracking number</div>
+              <div class="tracking-number" title="${this._esc(tracking)}">${this._esc(tracking)}</div>
+            </div>
+            <div class="package-class">
+              <strong>${this._esc(meta.label)}</strong>
+              <span>${this._esc(meta.className)}</span>
+            </div>
+          </section>
 
-        ${detail && !pkg.delivered ? `<div class="package-detail-text">${this._esc(detail)}</div>` : ""}
-        ${latest && (latest.date || latest.location) ? `
-          <div class="package-latest">
-            <span class="event-date">${this._esc(latest.date || "")}</span>
-            <span class="event-location">${this._esc(latest.location || "")}</span>
-          </div>
-        ` : ""}
-        ${pkg.error ? `<div class="package-error">${this._esc(pkg.error)}</div>` : ""}
-        ${pkg.auto_discovered && !needsDetails ? `
-          <div class="package-meta muted">From Informed Delivery</div>
-        ` : ""}
+          <section class="address-section">
+            <div class="ship-to">Ship To</div>
+            <div class="recipient">
+              <h3 class="recipient-name ${forName ? "" : "is-empty"}">${this._esc(recipientDisplay)}</h3>
+              <p class="recipient-address">
+                ${addressLines.map((line) => this._esc(line)).join("<br />")}
+              </p>
+              <div class="delivery-status ${statusClass}">
+                <span class="status-dot" aria-hidden="true"></span>
+                <span>${this._esc(statusLabel)}</span>
+              </div>
+              ${needsDetails ? `
+                <div class="discover-badge compact" title="Found in USPS Informed Delivery — add who it's for and where">
+                  <span class="discover-ping" aria-hidden="true"></span>
+                  Auto discovered
+                </div>
+              ` : ""}
+            </div>
+          </section>
 
-        <div class="package-actions">
-          ${needsDetails ? `
-            <button class="btn btn-sm btn-discover" data-action="complete-details" data-id="${pkg.id}">
-              Complete details
+          <section class="barcode-section" aria-hidden="true">
+            <div class="small-label">${this._esc(meta.label)} tracking barcode</div>
+            <div class="barcode" style="background:${barcodeBg}"></div>
+            <div class="barcode-number">${this._esc(trackingSpaced || tracking)}</div>
+          </section>
+
+          <section class="tracking-event">
+            <div class="event-code">
+              <div>
+                <strong>${this._esc(eventCode)}</strong>
+                <span>${this._esc(eventCodeLabel)}</span>
+              </div>
+            </div>
+            <div class="event-details">
+              <h4 class="event-title">${this._esc(eventTitle)}</h4>
+              <div class="event-meta">
+                ${eventWhen ? `${this._esc(eventWhen)}<br />` : ""}
+                ${eventLocation ? `<span class="event-location">${this._esc(eventLocation)}</span><br />` : ""}
+                ${sourceLine ? this._esc(sourceLine) : (pkg.delivered ? "Delivered" : "Live tracking")}
+              </div>
+            </div>
+          </section>
+
+          <footer class="label-footer">
+            ${needsDetails ? `
+              <button class="action-button primary" type="button" data-action="complete-details" data-id="${pkg.id}">
+                Complete details
+              </button>
+            ` : `
+              <button class="action-button" type="button" data-action="refresh" data-id="${pkg.id}" ${isRefreshing ? "disabled" : ""}>
+                ${isRefreshing ? "..." : "Refresh"}
+              </button>
+            `}
+            <button class="action-button ${needsDetails ? "" : "primary"}" type="button" data-action="view" data-id="${pkg.id}">
+              View Details
             </button>
-          ` : ""}
-          <button class="btn btn-sm" data-action="refresh" data-id="${pkg.id}" ${isRefreshing ? "disabled" : ""}>
-            ${isRefreshing ? "..." : "Refresh"}
-          </button>
-          <button class="btn btn-sm" data-action="view" data-id="${pkg.id}">Details</button>
-          <button class="btn btn-sm btn-danger" data-action="delete" data-id="${pkg.id}">Remove</button>
-        </div>
-      </div>
+            <button
+              class="action-button remove"
+              type="button"
+              data-action="delete"
+              data-id="${pkg.id}"
+              aria-label="Remove package"
+              title="Remove package"
+            >×</button>
+          </footer>
+        </section>
+      </article>
     `;
   }
 
@@ -1794,8 +2056,278 @@ class HomeDeliveryPanel extends HTMLElement {
     }
   }
 
-  _renderSettingsContent() {
+  _escapeAttr(value) {
+    return String(value ?? "")
+      .replace(/&/g, "&amp;")
+      .replace(/"/g, "&quot;")
+      .replace(/</g, "&lt;");
+  }
+
+  _entityFriendlyName(entityId) {
+    if (!entityId) return "Media player";
+    return String(entityId).split(".").pop() || entityId;
+  }
+
+  _renderCollapsibleSection(id, title, subtitle, content, {
+    hasToggle = false,
+    toggleId = "",
+    toggleChecked = false,
+  } = {}) {
+    const open = this._expandedSections.has(id);
+    return `
+      <div class="collapsible-section ${open ? "open" : ""}" data-section-id="${id}">
+        <div class="collapsible-header">
+          <div class="collapsible-header-left">
+            ${hasToggle ? `
+              <label class="toggle-switch" style="margin-right: 8px;" onclick="event.stopPropagation()">
+                <input type="checkbox" id="${toggleId}" ${toggleChecked ? "checked" : ""} />
+                <span class="toggle-slider"></span>
+              </label>
+            ` : ""}
+            <div>
+              <div class="collapsible-title">${title}</div>
+              ${subtitle ? `<div class="collapsible-subtitle">${subtitle}</div>` : ""}
+            </div>
+          </div>
+          <button type="button" class="collapsible-toggle" data-toggle-section="${id}" aria-label="Toggle ${title}">
+            <svg class="collapsible-chevron" viewBox="0 0 24 24" fill="currentColor"><path d="M7.41 8.59L12 13.17l4.59-4.58L18 10l-6 6-6-6 1.41-1.41z"/></svg>
+          </button>
+        </div>
+        <div class="collapsible-content">${content}</div>
+      </div>
+    `;
+  }
+
+  _renderPerSpeakerSection(typeId, defaultVolume = 0.6) {
+    const mediaPlayers = this._settings.media_players || [];
+    const announcementPlayers = this._settings.announcement_players || {};
+    const typeOverrides = announcementPlayers[typeId] || {};
+
+    if (mediaPlayers.length === 0) {
+      return `
+        <div class="per-speaker-empty">
+          <span class="muted">No media players configured.</span>
+          <button type="button" class="per-speaker-link" data-nav-section="media-players">Configure in Media Players</button>
+        </div>
+      `;
+    }
+
+    return `
+      <div class="per-speaker-list" data-type-id="${typeId}">
+        ${mediaPlayers.map((mp) => {
+          const entityId = mp.entity_id || "";
+          const override = typeOverrides[entityId] || {};
+          const volume = override.volume !== undefined ? override.volume : (mp.volume ?? defaultVolume);
+          const bypass = !!override.bypass;
+          const displayName = this._entityFriendlyName(entityId);
+          return `
+            <div class="per-speaker-row" data-entity-id="${this._escapeAttr(entityId)}">
+              <span class="per-speaker-name" title="${this._escapeAttr(entityId)}">${this._escapeAttr(displayName)}</span>
+              <div class="per-speaker-controls">
+                <input type="range" class="per-speaker-volume" min="0" max="1" step="0.05"
+                       value="${volume}" data-type-id="${typeId}" data-entity-id="${this._escapeAttr(entityId)}"
+                       ${bypass ? "disabled" : ""} />
+                <span class="per-speaker-volume-val">${Math.round(volume * 100)}%</span>
+                <label class="toggle-switch per-speaker-bypass">
+                  <input type="checkbox" class="per-speaker-bypass-input"
+                         data-type-id="${typeId}" data-entity-id="${this._escapeAttr(entityId)}"
+                         ${bypass ? "checked" : ""} />
+                  <span class="toggle-slider"></span>
+                </label>
+                <span class="per-speaker-bypass-label">Skip</span>
+              </div>
+            </div>
+          `;
+        }).join("")}
+      </div>
+    `;
+  }
+
+  _renderMediaPlayerCard(m, i) {
+    const cardId = `media-player-${i}`;
+    const title = this._entityFriendlyName(m.entity_id);
+    const configured = m.tts_entity_id ? "Configured" : "Not configured";
+    const subtitle = `${configured} · ${m.tts_entity_id ? m.tts_entity_id.replace(/^tts\./, "") : "No TTS"}`;
+    const haPlayers = this._mediaPlayers || [];
+    const ttsEntities = this._ttsEntities || [];
+    const entityOptions = [...new Set([m.entity_id, ...haPlayers].filter(Boolean))];
+    const ttsOptions = [...new Set([m.tts_entity_id, ...ttsEntities].filter(Boolean))];
+    const vol = m.volume ?? 0.6;
+    const optionsJson = this._escapeAttr(JSON.stringify(m.options || {}));
+
+    const content = `
+      <div class="media-player-card" data-index="${i}">
+        <div class="form-group">
+          <label>Media Player *</label>
+          <div class="media-player-controls">
+            <select class="media-player-select" data-field="entity_id">
+              ${entityOptions.map((e) => `<option value="${this._escapeAttr(e)}" ${e === m.entity_id ? "selected" : ""}>${this._escapeAttr(e)}</option>`).join("")}
+            </select>
+            <button type="button" class="btn btn-secondary btn-icon" data-remove-media="${i}" aria-label="Remove player">Remove</button>
+          </div>
+        </div>
+        <div class="form-group">
+          <label>TTS Entity *</label>
+          <select class="media-player-tts-entity" data-field="tts_entity_id">
+            <option value="">-- Select TTS Entity --</option>
+            ${ttsOptions.map((e) => `<option value="${this._escapeAttr(e)}" ${e === m.tts_entity_id ? "selected" : ""}>${this._escapeAttr(e)}</option>`).join("")}
+          </select>
+        </div>
+        <div class="form-group">
+          <label for="${cardId}-volume">Announcement volume</label>
+          <div class="range-slider">
+            <input type="range" id="${cardId}-volume" class="media-player-volume" data-field="volume"
+                   min="0" max="1" step="0.05" value="${vol}" />
+            <span class="range-value">${Math.round(vol * 100)}%</span>
+          </div>
+          <p class="hint">Speaker is set to this level for announcements, then restored.</p>
+        </div>
+        <div class="playback-options-row">
+          <div class="form-group">
+            <label>Preroll (ms)</label>
+            <input type="number" class="media-player-preroll" data-field="preroll_ms" min="0" max="2000" step="50" value="${m.preroll_ms ?? 150}" />
+          </div>
+          <div class="settings-toggle-row">
+            <span class="inline-toggle-label">Cache TTS</span>
+            <label class="toggle-switch">
+              <input type="checkbox" class="media-player-cache" data-field="cache" ${m.cache ? "checked" : ""} />
+              <span class="toggle-slider"></span>
+            </label>
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label>Language</label>
+            <input type="text" class="media-player-language" data-field="language" placeholder="e.g. en, en-US" value="${this._escapeAttr(m.language || "")}" />
+          </div>
+          <div class="form-group">
+            <label>Options (JSON)</label>
+            <input type="text" class="media-player-options" data-field="options" placeholder='{"key": "value"}' value="${optionsJson}" />
+          </div>
+        </div>
+        <div class="media-player-actions">
+          <button type="button" class="test-tts-btn" data-test-media="${i}">Test announcement</button>
+        </div>
+      </div>
+    `;
+    return `
+      <div class="settings-panel settings-panel--player">
+        ${this._renderCollapsibleSection(cardId, title, subtitle, content)}
+      </div>
+    `;
+  }
+
+  _renderMessageTypeSection(typeId, title, subtitle, toggleId, enabled, testMessage) {
+    return this._renderCollapsibleSection(typeId.replace(/_/g, "-"), title, subtitle, `
+      <div class="subsection-title">Per-speaker playback</div>
+      <div class="per-speaker-header">
+        <span>Speaker</span>
+        <span>Volume</span>
+        <span>Skip</span>
+      </div>
+      ${this._renderPerSpeakerSection(typeId, 0.6)}
+      <div class="form-actions-row">
+        <button type="button" class="test-tts-btn" data-test-type="${typeId}" data-test-message="${this._escapeAttr(testMessage)}">Test announcement</button>
+      </div>
+    `, { hasToggle: true, toggleId, toggleChecked: enabled });
+  }
+
+  _renderAnnouncementsPane(activePane) {
     const tts = this._settings.tts || {};
+    const mediaPlayers = this._settings.media_players || [];
+    const messagePrefix = this._settings.message_prefix || "Home Delivery update";
+    const configuredIds = new Set(mediaPlayers.map((m) => m.entity_id).filter(Boolean));
+    const availableMediaPlayers = (this._mediaPlayers || []).filter((e) => !configuredIds.has(e));
+
+    return `
+      <section class="settings-pane ${activePane === "announcements" ? "active" : ""}" data-settings-pane="announcements">
+        <div class="settings-pane-head">
+          <div class="settings-pane-title">Announcements</div>
+          <div class="settings-pane-sub">Spoken package and mail updates. Configure media players, then enable message types below.</div>
+        </div>
+
+        <div class="settings-card">
+          <div class="settings-card-body">
+            <div class="settings-toggle-row">
+              <span class="inline-toggle-label">Enable TTS announcements</span>
+              <label class="toggle-switch">
+                <input type="checkbox" id="tts-enabled" ${tts.enabled ? "checked" : ""} />
+                <span class="toggle-slider"></span>
+              </label>
+            </div>
+            <div class="form-row" style="margin-top: var(--space-4);">
+              <div class="form-group">
+                <label for="tts-start-time">Active from</label>
+                <input type="time" id="tts-start-time" value="${tts.start_time || "08:00"}" />
+              </div>
+              <div class="form-group">
+                <label for="tts-end-time">Active until</label>
+                <input type="time" id="tts-end-time" value="${tts.end_time || "21:00"}" />
+              </div>
+            </div>
+            <p class="hint">Announcements only play between these hours</p>
+          </div>
+        </div>
+
+        ${this._renderCollapsibleSection("general", "Message Intro", "Opening phrase spoken before updates", `
+          <div class="form-group">
+            <label for="message-prefix">Intro Message</label>
+            <input type="text" id="message-prefix" placeholder="Home Delivery update" value="${this._escapeAttr(messagePrefix)}" />
+            <p class="hint">Spoken before each announcement message.</p>
+          </div>
+        `)}
+
+        ${this._renderCollapsibleSection("media-players", "Media Players", `${mediaPlayers.length} configured`, `
+          <p class="hint">Each media player has its own TTS entity, volume, preroll, and options.</p>
+          <div class="media-player-list" id="media-player-list">
+            ${mediaPlayers.map((m, i) => this._renderMediaPlayerCard(m, i)).join("")}
+          </div>
+          <div class="form-row media-player-add-row">
+            <select id="media-player-add">
+              <option value="">Add media player...</option>
+              ${availableMediaPlayers.map((e) => `<option value="${this._escapeAttr(e)}">${this._escapeAttr(e)}</option>`).join("")}
+            </select>
+            <button type="button" class="btn btn-secondary" id="add-media-btn">Add</button>
+          </div>
+        `)}
+
+        ${this._renderMessageTypeSection(
+          "status_change",
+          "Status Changes",
+          "Speak when package status updates",
+          "tts-status-change",
+          tts.enable_status_change !== false,
+          "Package update: Your package status has changed.",
+        )}
+        ${this._renderMessageTypeSection(
+          "out_for_delivery",
+          "Out for Delivery",
+          "Speak when a package is out for delivery",
+          "tts-out-for-delivery",
+          tts.enable_out_for_delivery !== false,
+          "Heads up! Your package is out for delivery.",
+        )}
+        ${this._renderMessageTypeSection(
+          "delivered",
+          "Delivered",
+          "Speak when a package is delivered",
+          "tts-delivered",
+          tts.enable_delivered !== false,
+          "Great news! Your package has been delivered.",
+        )}
+        ${this._renderMessageTypeSection(
+          "mail_arrived",
+          "Mail Arrived",
+          "Speak when Informed Delivery mail arrives",
+          "tts-mail-arrived",
+          tts.enable_mail_arrived !== false,
+          "You have mail arriving today.",
+        )}
+      </section>
+    `;
+  }
+
+  _renderSettingsContent() {
     const polling = this._settings.polling || {};
     const { mode } = this._getAppearance();
     const activePane = this._settingsPane || "general";
@@ -1837,59 +2369,7 @@ class HomeDeliveryPanel extends HTMLElement {
 
             ${this._renderMailSettingsPane(activePane)}
 
-            <section class="settings-pane ${activePane === "announcements" ? "active" : ""}" data-settings-pane="announcements">
-              <div class="settings-pane-head">
-                <div class="settings-pane-title">Announcements</div>
-                <div class="settings-pane-sub">Text-to-Speech notifications</div>
-              </div>
-              <div class="settings-card">
-                <div class="settings-card-body">
-                  <div class="form-group">
-                    <label class="checkbox-label">
-                      <input type="checkbox" id="tts-enabled" ${tts.enabled ? "checked" : ""} />
-                      Enable TTS Announcements
-                    </label>
-                  </div>
-                  <h4>Triggers</h4>
-                  <div class="form-group">
-                    <label class="checkbox-label">
-                      <input type="checkbox" id="tts-status-change" ${tts.enable_status_change !== false ? "checked" : ""} />
-                      Status Changes
-                    </label>
-                  </div>
-                  <div class="form-group">
-                    <label class="checkbox-label">
-                      <input type="checkbox" id="tts-out-for-delivery" ${tts.enable_out_for_delivery !== false ? "checked" : ""} />
-                      Out for Delivery
-                    </label>
-                  </div>
-                  <div class="form-group">
-                    <label class="checkbox-label">
-                      <input type="checkbox" id="tts-delivered" ${tts.enable_delivered !== false ? "checked" : ""} />
-                      Delivered
-                    </label>
-                  </div>
-                  <div class="form-group">
-                    <label class="checkbox-label">
-                      <input type="checkbox" id="tts-mail-arrived" ${tts.enable_mail_arrived !== false ? "checked" : ""} />
-                      Mail Arrived
-                    </label>
-                  </div>
-                  <h4>Quiet Hours</h4>
-                  <div class="form-row">
-                    <div class="form-group">
-                      <label for="tts-start-time">Start</label>
-                      <input type="time" id="tts-start-time" value="${tts.start_time || "08:00"}" />
-                    </div>
-                    <div class="form-group">
-                      <label for="tts-end-time">End</label>
-                      <input type="time" id="tts-end-time" value="${tts.end_time || "21:00"}" />
-                    </div>
-                  </div>
-                  <p class="hint">Announcements only play between these hours</p>
-                </div>
-              </div>
-            </section>
+            ${this._renderAnnouncementsPane(activePane)}
 
             <section class="settings-pane ${activePane === "appearance" ? "active" : ""}" data-settings-pane="appearance">
               <div class="settings-pane-head">
@@ -2231,7 +2711,7 @@ class HomeDeliveryPanel extends HTMLElement {
             placeholder="e.g., 9400111899560438600329"
             value="${this._esc(wiz.tracking || "")}"
             ${probing ? "disabled" : ""} />
-          <p class="hint">We'll check USPS, UPS, and FedEx automatically</p>
+          <p class="hint">We'll check Estes, UPS, FedEx, and USPS automatically</p>
         </div>
         ${carrier ? `
           <div class="wizard-carrier-result">
@@ -2436,6 +2916,144 @@ class HomeDeliveryPanel extends HTMLElement {
           .forEach(p => p.classList.toggle("active", p.dataset.settingsPane === pane));
       });
     });
+
+    s.querySelectorAll("[data-toggle-section]").forEach((btn) => {
+      btn.addEventListener("click", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const id = btn.dataset.toggleSection;
+        const section = s.querySelector(`.collapsible-section[data-section-id="${id}"]`);
+        if (!section) return;
+        const open = section.classList.toggle("open");
+        if (open) this._expandedSections.add(id);
+        else this._expandedSections.delete(id);
+      });
+    });
+
+    s.querySelectorAll(".collapsible-header").forEach((header) => {
+      header.addEventListener("click", (e) => {
+        if (e.target.closest(".toggle-switch, button, input, select, textarea, label")) return;
+        const section = header.closest(".collapsible-section");
+        const id = section?.dataset.sectionId;
+        if (!id) return;
+        const open = section.classList.toggle("open");
+        if (open) this._expandedSections.add(id);
+        else this._expandedSections.delete(id);
+      });
+    });
+
+    s.querySelectorAll("[data-nav-section]").forEach((btn) => {
+      btn.addEventListener("click", (e) => {
+        e.preventDefault();
+        const id = btn.dataset.navSection;
+        this._expandedSections.add(id);
+        const section = s.querySelector(`.collapsible-section[data-section-id="${id}"]`);
+        if (section) {
+          section.classList.add("open");
+          section.scrollIntoView({ behavior: "smooth", block: "nearest" });
+        }
+      });
+    });
+
+    const addMediaBtn = s.querySelector("#add-media-btn");
+    const addMediaSelect = s.querySelector("#media-player-add");
+    if (addMediaBtn && addMediaSelect) {
+      addMediaBtn.addEventListener("click", () => {
+        const entityId = addMediaSelect.value;
+        if (!entityId) return;
+        this._syncSettingsFromForm();
+        if (!Array.isArray(this._settings.media_players)) this._settings.media_players = [];
+        if (this._settings.media_players.some((m) => m.entity_id === entityId)) return;
+        this._settings.media_players.push({
+          entity_id: entityId,
+          tts_entity_id: (this._ttsEntities || [])[0] || "",
+          volume: 0.6,
+          preroll_ms: 150,
+          cache: true,
+          language: "",
+          options: {},
+        });
+        this._expandedSections.add("media-players");
+        this._scheduleAutoSave();
+        this._render();
+      });
+    }
+
+    s.querySelectorAll("[data-remove-media]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const index = parseInt(btn.dataset.removeMedia, 10);
+        this._syncSettingsFromForm();
+        if (!Array.isArray(this._settings.media_players)) return;
+        this._settings.media_players.splice(index, 1);
+        this._scheduleAutoSave();
+        this._render();
+      });
+    });
+
+    s.querySelectorAll(".media-player-volume, .per-speaker-volume").forEach((slider) => {
+      slider.addEventListener("input", () => {
+        const valEl = slider.parentElement?.querySelector(".range-value, .per-speaker-volume-val");
+        if (valEl) valEl.textContent = `${Math.round(parseFloat(slider.value) * 100)}%`;
+      });
+    });
+
+    s.querySelectorAll(".per-speaker-bypass-input").forEach((chk) => {
+      chk.addEventListener("change", () => {
+        const row = chk.closest(".per-speaker-row");
+        const volume = row?.querySelector(".per-speaker-volume");
+        if (volume) volume.disabled = chk.checked;
+      });
+    });
+
+    s.querySelectorAll("[data-test-media]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        this._syncSettingsFromForm();
+        await this._saveSettings({ silent: true });
+        const index = parseInt(btn.dataset.testMedia, 10);
+        const mp = (this._settings.media_players || [])[index];
+        if (!mp?.entity_id) {
+          this._showToast("Configure a media player first", { error: true });
+          return;
+        }
+        try {
+          btn.disabled = true;
+          await this._fetchApi("/api/test-tts", {
+            method: "POST",
+            body: JSON.stringify({
+              message: "This is a Home Delivery test announcement.",
+              media_player: mp.entity_id,
+            }),
+          });
+          this._showToast("Test announcement sent");
+        } catch (err) {
+          this._showToast(err?.message || "Test failed", { error: true });
+        } finally {
+          btn.disabled = false;
+        }
+      });
+    });
+
+    s.querySelectorAll("[data-test-type]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        this._syncSettingsFromForm();
+        await this._saveSettings({ silent: true });
+        try {
+          btn.disabled = true;
+          await this._fetchApi("/api/test-tts", {
+            method: "POST",
+            body: JSON.stringify({
+              message: btn.dataset.testMessage || "This is a Home Delivery test announcement.",
+              type_id: btn.dataset.testType,
+            }),
+          });
+          this._showToast("Test announcement sent");
+        } catch (err) {
+          this._showToast(err?.message || "Test failed", { error: true });
+        } finally {
+          btn.disabled = false;
+        }
+      });
+    });
   }
 
   async _handleAction(e, action, data) {
@@ -2524,6 +3142,10 @@ class HomeDeliveryPanel extends HTMLElement {
         break;
       case "select-history-day":
         this._historySelectedDate = data.date || null;
+        this._render();
+        break;
+      case "history-back-calendar":
+        this._historySelectedDate = null;
         this._render();
         break;
       case "history-prev-month": {
@@ -3091,21 +3713,15 @@ class HomeDeliveryPanel extends HTMLElement {
       }
 
       .history-view {
-        display: grid;
-        grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr);
-        gap: var(--space-3);
-        align-items: start;
-      }
-
-      @media (max-width: 900px) {
-        .history-view {
-          grid-template-columns: 1fr;
-        }
+        display: block;
+        width: 100%;
+        min-width: 0;
       }
 
       .history-calendar,
-      .history-detail {
-        padding: var(--space-3);
+      .history-day-full {
+        width: 100%;
+        padding: var(--space-4);
       }
 
       .history-cal-head {
@@ -3113,28 +3729,30 @@ class HomeDeliveryPanel extends HTMLElement {
         align-items: center;
         justify-content: space-between;
         gap: var(--space-2);
-        margin-bottom: var(--space-3);
+        margin-bottom: var(--space-4);
       }
 
       .history-cal-title {
         font-weight: 700;
-        font-size: 15px;
+        font-size: clamp(18px, 3vw, 22px);
+        letter-spacing: -0.02em;
       }
 
       .history-dow {
         display: grid;
         grid-template-columns: repeat(7, minmax(0, 1fr));
-        gap: 4px;
-        margin-bottom: 4px;
+        gap: 6px;
+        margin-bottom: 6px;
         color: var(--hd-muted);
-        font-size: 11px;
+        font-size: 12px;
         text-align: center;
+        font-weight: 600;
       }
 
       .history-grid {
         display: grid;
         grid-template-columns: repeat(7, minmax(0, 1fr));
-        gap: 4px;
+        gap: 6px;
       }
 
       .hist-cell {
@@ -3142,15 +3760,16 @@ class HomeDeliveryPanel extends HTMLElement {
         border: 1px solid var(--hd-border);
         background: transparent;
         color: var(--hd-text);
-        border-radius: var(--radius-sm);
-        min-height: 52px;
-        padding: 4px;
+        border-radius: var(--radius-md);
+        min-height: clamp(64px, 12vw, 88px);
+        padding: 8px;
         display: flex;
         flex-direction: column;
         align-items: flex-start;
         justify-content: space-between;
         cursor: pointer;
         text-align: left;
+        transition: border-color var(--dur-fast) var(--ease), background var(--dur-fast) var(--ease), transform var(--dur-fast) var(--ease);
       }
 
       .hist-cell--empty {
@@ -3159,7 +3778,7 @@ class HomeDeliveryPanel extends HTMLElement {
       }
 
       .hist-cell:disabled {
-        opacity: 0.35;
+        opacity: 0.32;
         cursor: default;
       }
 
@@ -3168,21 +3787,23 @@ class HomeDeliveryPanel extends HTMLElement {
         background: rgba(255, 255, 255, 0.03);
       }
 
-      .hist-cell.active {
+      .hist-cell.has-data:hover {
         border-color: var(--hd-accent);
-        box-shadow: inset 0 0 0 1px var(--hd-accent);
+        background: color-mix(in srgb, var(--hd-accent) 10%, transparent);
+        transform: translateY(-1px);
       }
 
       .hist-daynum {
-        font-size: 12px;
-        font-weight: 600;
+        font-size: 14px;
+        font-weight: 700;
       }
 
       .hist-counts {
         display: flex;
-        gap: 4px;
-        font-size: 10px;
+        gap: 6px;
+        font-size: 11px;
         color: var(--hd-muted);
+        font-weight: 600;
       }
 
       .hist-mail { color: var(--hd-accent); }
@@ -3190,40 +3811,45 @@ class HomeDeliveryPanel extends HTMLElement {
 
       .history-legend,
       .history-loading {
-        margin-top: var(--space-2);
+        margin-top: var(--space-3);
         color: var(--hd-muted);
-        font-size: 11px;
-      }
-
-      .history-detail-empty {
-        padding: var(--space-4) 0;
+        font-size: 12px;
         text-align: center;
-        color: var(--hd-muted);
       }
 
       .history-detail-head {
-        margin-bottom: var(--space-3);
+        margin-bottom: var(--space-4);
       }
 
       .history-letters {
         display: flex;
         flex-direction: column;
-        gap: var(--space-3);
+        gap: var(--space-4);
       }
 
       .history-letter {
         display: grid;
-        grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr);
-        gap: var(--space-3);
+        grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr);
+        gap: var(--space-4);
         align-items: start;
-        padding-top: var(--space-3);
+        padding-top: var(--space-4);
         border-top: 1px solid var(--hd-border);
       }
 
-      @media (max-width: 560px) {
+      .history-letter:first-of-type {
+        border-top: none;
+        padding-top: 0;
+      }
+
+      @media (max-width: 700px) {
         .history-letter {
           grid-template-columns: 1fr;
         }
+      }
+
+      .hd-menubar-spacer {
+        width: 1px;
+        min-width: 64px;
       }
 
       .history-letter-preview {
@@ -3256,21 +3882,19 @@ class HomeDeliveryPanel extends HTMLElement {
       }
 
       .mail-hero-stage {
-        display: grid;
-        grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr);
-        align-items: center;
-        gap: var(--space-3);
+        display: flex;
+        flex-direction: column;
+        align-items: stretch;
+        gap: var(--space-2);
         min-width: 0;
       }
 
       .mail-hero-preview {
         width: 100%;
-        max-width: 420px;
         display: flex;
         justify-content: center;
         align-items: center;
         min-height: 0;
-        justify-self: center;
       }
 
       .mail-hero-counts {
@@ -3285,15 +3909,6 @@ class HomeDeliveryPanel extends HTMLElement {
         border-radius: var(--radius-sm);
         background: rgba(255, 255, 255, 0.03);
         border: 1px solid var(--hd-border);
-      }
-
-      @media (max-width: 560px) {
-        .mail-hero-stage {
-          grid-template-columns: 1fr;
-        }
-        .mail-hero-counts {
-          grid-template-columns: 1fr 1fr;
-        }
       }
 
       .mail-hero-message {
@@ -3316,7 +3931,7 @@ class HomeDeliveryPanel extends HTMLElement {
       }
 
       .mail-count-large {
-        font-size: clamp(24px, 6.5vw, 34px);
+        font-size: clamp(22px, 5.5vw, 32px);
         font-weight: 700;
         color: var(--hd-accent);
         line-height: 0.95;
@@ -3342,7 +3957,7 @@ class HomeDeliveryPanel extends HTMLElement {
 
       .mail-preview img {
         width: 100%;
-        max-height: clamp(56px, 12vw, 96px);
+        max-height: clamp(88px, 18vw, 140px);
         object-fit: contain;
         object-position: center;
         border-radius: var(--radius-md);
@@ -3356,7 +3971,7 @@ class HomeDeliveryPanel extends HTMLElement {
         align-items: center;
         justify-content: center;
         width: 100%;
-        min-height: clamp(56px, 12vw, 96px);
+        min-height: clamp(88px, 18vw, 140px);
         aspect-ratio: 724 / 320;
         border-radius: var(--radius-md);
         border: 1px dashed var(--hd-border-strong);
@@ -3368,7 +3983,7 @@ class HomeDeliveryPanel extends HTMLElement {
       .mail-meta {
         font-size: 12px;
         color: var(--hd-muted);
-        margin-top: var(--space-3);
+        margin-top: var(--space-1);
       }
 
       .mail-meta-warn {
@@ -3397,7 +4012,7 @@ class HomeDeliveryPanel extends HTMLElement {
         min-width: 0;
         max-width: 100%;
         min-height: 0;
-        max-height: clamp(56px, 12vw, 96px);
+        max-height: clamp(88px, 18vw, 140px);
         aspect-ratio: 724 / 320;
         border-radius: var(--radius-md);
         overflow: hidden;
@@ -3808,175 +4423,465 @@ class HomeDeliveryPanel extends HTMLElement {
 
       .package-grid {
         display: grid;
-        grid-template-columns: repeat(auto-fill, minmax(min(100%, 280px), 1fr));
-        gap: var(--space-3);
+        grid-template-columns: repeat(auto-fill, minmax(min(100%, 340px), 1fr));
+        gap: var(--space-4);
       }
 
+      /* Mailing-label package cards */
       .package-card {
+        --label-ink: #111;
+        --label-muted: #555;
+        --label-paper: #f7f7f2;
+        --label-panel: rgba(255, 255, 255, 0.94);
+        --usps-blue: #004b87;
+        --usps-red: #da291c;
         position: relative;
         overflow: hidden;
-        background:
-          radial-gradient(ellipse 80% 60% at 0% 0%, color-mix(in srgb, var(--hd-accent) 10%, transparent), transparent 55%),
-          linear-gradient(165deg, var(--hd-elevated) 0%, var(--hd-surface) 100%);
-        border: 1px solid var(--hd-border);
-        border-radius: 16px;
-        padding: var(--space-3) var(--space-3) var(--space-2);
-        transition: border-color var(--dur-fast) var(--ease), box-shadow var(--dur-fast) var(--ease), transform var(--dur-fast) var(--ease);
+        color: var(--label-ink);
+        background: var(--label-paper);
+        border: 1px solid rgba(255, 255, 255, 0.22);
+        border-radius: 10px;
+        padding: 0;
+        box-shadow:
+          0 18px 40px rgba(0, 0, 0, 0.35),
+          inset 0 1px rgba(255, 255, 255, 0.9);
+        transition: transform var(--dur-fast) var(--ease), box-shadow var(--dur-fast) var(--ease);
       }
 
-      .package-card.carrier-usps {
-        background:
-          radial-gradient(ellipse 70% 55% at 0% 0%, rgba(0, 75, 135, 0.18), transparent 55%),
-          linear-gradient(165deg, var(--hd-elevated) 0%, var(--hd-surface) 100%);
-      }
-      .package-card.carrier-ups {
-        background:
-          radial-gradient(ellipse 70% 55% at 0% 0%, rgba(255, 181, 0, 0.14), transparent 55%),
-          linear-gradient(165deg, var(--hd-elevated) 0%, var(--hd-surface) 100%);
-      }
-      .package-card.carrier-fedex {
-        background:
-          radial-gradient(ellipse 70% 55% at 0% 0%, rgba(77, 20, 140, 0.16), transparent 55%),
-          linear-gradient(165deg, var(--hd-elevated) 0%, var(--hd-surface) 100%);
-      }
-      .package-card.carrier-estes {
-        background:
-          radial-gradient(ellipse 70% 55% at 0% 0%, rgba(255, 210, 0, 0.14), transparent 55%),
-          linear-gradient(165deg, var(--hd-elevated) 0%, var(--hd-surface) 100%);
+      .package-card::before {
+        content: "";
+        position: absolute;
+        inset: 0;
+        pointer-events: none;
+        opacity: 0.2;
+        background-image: repeating-linear-gradient(
+          0deg,
+          transparent 0,
+          transparent 4px,
+          rgba(0, 0, 0, 0.025) 5px
+        );
+        mix-blend-mode: multiply;
       }
 
       .package-card:hover {
-        border-color: var(--hd-border-strong);
-        box-shadow: var(--shadow-md);
         transform: translateY(-2px);
+        box-shadow:
+          0 22px 48px rgba(0, 0, 0, 0.42),
+          inset 0 1px rgba(255, 255, 255, 0.9);
       }
 
       .package-card.out-for-delivery {
-        border-color: color-mix(in srgb, var(--hd-warning) 55%, var(--hd-border));
+        box-shadow:
+          0 18px 40px rgba(0, 0, 0, 0.35),
+          0 0 0 2px color-mix(in srgb, #c98500 70%, transparent);
       }
 
       .package-card.delivered,
       .package-card.is-delivered {
-        border-color: color-mix(in srgb, var(--hd-success) 50%, var(--hd-border));
-        opacity: 0.92;
+        opacity: 0.94;
+        box-shadow:
+          0 18px 40px rgba(0, 0, 0, 0.3),
+          0 0 0 2px color-mix(in srgb, #2f8f57 65%, transparent);
       }
 
       .package-card.error {
-        border-color: color-mix(in srgb, var(--hd-danger) 45%, var(--hd-border));
+        box-shadow:
+          0 18px 40px rgba(0, 0, 0, 0.35),
+          0 0 0 2px color-mix(in srgb, #9e2b2b 70%, transparent);
       }
 
       .package-card.needs-details {
-        border-color: color-mix(in srgb, #5dbe7a 55%, var(--hd-border));
-        box-shadow: inset 0 0 0 1px color-mix(in srgb, #5dbe7a 25%, transparent);
+        box-shadow:
+          0 18px 40px rgba(0, 0, 0, 0.35),
+          0 0 0 2px color-mix(in srgb, #3f9a5f 70%, transparent);
       }
 
-      .pkg-card-top {
-        display: flex;
-        align-items: flex-start;
-        justify-content: space-between;
-        gap: var(--space-2);
-        margin-bottom: var(--space-3);
+      .pkg-label {
+        position: relative;
+        z-index: 1;
+        margin: 12px;
+        overflow: hidden;
+        border: 2px solid var(--label-ink);
+        background: var(--label-panel);
+        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
       }
 
-      .pkg-for-block {
+      .label-header {
+        display: grid;
+        grid-template-columns: 108px 1fr 64px;
+        min-height: 70px;
+        border-bottom: 2px solid var(--label-ink);
+      }
+
+      .carrier-logo {
+        display: grid;
+        place-items: center;
+        padding: 8px;
+        border-right: 2px solid var(--label-ink);
+        background: #fff;
         min-width: 0;
+      }
+
+      .carrier-logo-img {
+        display: block;
+        width: 100%;
+        max-width: 92px;
+        max-height: 48px;
+        object-fit: contain;
+      }
+
+      .carrier-logo-img.carrier-logo-ups {
+        max-width: 42px;
+        max-height: 50px;
+      }
+
+      .carrier-logo-text {
+        color: var(--label-ink);
+        font-family: Arial Black, Arial, sans-serif;
+        font-size: 16px;
+        font-weight: 900;
+        letter-spacing: -0.5px;
+        text-align: center;
+      }
+
+      .service-block {
         display: flex;
         flex-direction: column;
-        gap: 2px;
+        justify-content: center;
+        padding: 10px 12px;
+        min-width: 0;
       }
 
-      .pkg-for-label {
-        font-size: 10px;
+      .service-block strong {
+        font-size: 14px;
+        line-height: 1.15;
+        text-transform: uppercase;
+        letter-spacing: -0.01em;
+      }
+
+      .service-block span {
+        margin-top: 5px;
+        color: var(--label-muted);
+        font-size: 9px;
+        font-weight: 800;
         letter-spacing: 0.12em;
         text-transform: uppercase;
-        color: var(--hd-muted);
-        font-weight: 600;
       }
 
-      .pkg-for-name {
-        font-size: clamp(18px, 3.2vw, 22px);
-        font-weight: 750;
-        letter-spacing: -0.03em;
-        line-height: 1.1;
-        color: var(--hd-text);
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
+      .route-code {
+        display: grid;
+        place-items: center;
+        border-left: 2px solid var(--label-ink);
+        font-family: Arial Black, Arial, sans-serif;
+        font-size: 22px;
+        font-weight: 900;
+        line-height: 1;
+        text-align: center;
+        padding: 6px;
+        word-break: break-all;
       }
 
-      .pkg-for-name.is-empty {
-        color: color-mix(in srgb, #5dbe7a 85%, var(--hd-text));
-        font-style: italic;
-        font-weight: 650;
+      .label-meta {
+        display: grid;
+        grid-template-columns: 1fr 104px;
+        border-bottom: 2px solid var(--label-ink);
       }
 
-      .pkg-for-dest {
+      .tracking-summary {
+        padding: 10px 12px;
+        border-right: 2px solid var(--label-ink);
+        min-width: 0;
+      }
+
+      .small-label {
+        color: var(--label-muted);
+        font-size: 8px;
+        font-weight: 900;
+        letter-spacing: 0.13em;
+        text-transform: uppercase;
+      }
+
+      .tracking-number {
+        margin-top: 4px;
+        font-family: "Courier New", ui-monospace, monospace;
         font-size: 12px;
-        color: var(--hd-muted);
+        font-weight: 900;
+        letter-spacing: 0.02em;
+        word-break: break-all;
+      }
+
+      .package-class {
+        display: grid;
+        place-items: center;
+        padding: 8px;
+        text-align: center;
+      }
+
+      .package-class strong {
+        font-size: 12px;
+        text-transform: uppercase;
+      }
+
+      .package-class span {
+        margin-top: 3px;
+        color: var(--label-muted);
+        font-size: 8px;
+        font-weight: 800;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+
+      .address-section {
+        display: grid;
+        grid-template-columns: 48px 1fr;
+        min-height: 118px;
+        border-bottom: 2px solid var(--label-ink);
+      }
+
+      .ship-to {
+        display: flex;
+        align-items: flex-start;
+        justify-content: center;
+        padding-top: 14px;
+        border-right: 2px solid var(--label-ink);
+        font-size: 10px;
+        font-weight: 900;
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+        writing-mode: vertical-rl;
+        transform: rotate(180deg);
+      }
+
+      .recipient {
+        padding: 14px 14px 12px;
+        min-width: 0;
+      }
+
+      .recipient-name {
+        margin: 0;
+        font-size: 23px;
+        font-weight: 900;
+        letter-spacing: -0.04em;
+        text-transform: uppercase;
+        line-height: 1.05;
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
       }
 
-      .pkg-status-chip {
-        display: inline-flex;
-        align-items: center;
-        gap: 6px;
-        flex-shrink: 0;
-        max-width: 48%;
-        padding: 6px 10px;
-        border-radius: 999px;
-        font-size: 11px;
-        font-weight: 700;
-        letter-spacing: 0.01em;
-        color: var(--hd-text);
-        background: color-mix(in srgb, var(--hd-text) 6%, transparent);
-        border: 1px solid var(--hd-border);
-        white-space: nowrap;
-        overflow: hidden;
-        text-overflow: ellipsis;
+      .recipient-name.is-empty {
+        color: #2f8f57;
+        font-style: italic;
+        text-transform: none;
       }
 
-      .pkg-status-dot {
-        width: 7px;
-        height: 7px;
-        border-radius: 50%;
-        background: var(--hd-muted);
-        flex-shrink: 0;
+      .recipient-address {
+        margin: 8px 0 0;
+        font-family: "Courier New", ui-monospace, monospace;
+        font-size: 13px;
+        font-weight: 800;
+        line-height: 1.4;
+        text-transform: uppercase;
+        word-break: break-word;
       }
 
-      .pkg-status-chip.out-for-delivery {
-        color: #f0c674;
-        border-color: color-mix(in srgb, #f0c674 45%, transparent);
-        background: color-mix(in srgb, #f0c674 12%, transparent);
-      }
-      .pkg-status-chip.out-for-delivery .pkg-status-dot { background: #f0c674; }
-
-      .pkg-status-chip.delivered {
-        color: #6dca8b;
-        border-color: color-mix(in srgb, #6dca8b 50%, transparent);
-        background: color-mix(in srgb, #6dca8b 14%, transparent);
-      }
-      .pkg-status-chip.delivered .pkg-status-dot { background: #6dca8b; }
-
-      .pkg-status-chip.error {
-        color: #e88a8a;
-        border-color: color-mix(in srgb, #e88a8a 45%, transparent);
-        background: color-mix(in srgb, #e88a8a 12%, transparent);
-      }
-      .pkg-status-chip.error .pkg-status-dot { background: #e88a8a; }
-
-      .pkg-status-chip.in-transit .pkg-status-dot,
-      .pkg-status-chip.pending .pkg-status-dot {
-        background: #7eb8ff;
-      }
-
-      .pkg-card-mid {
+      .delivery-status {
         display: flex;
         align-items: center;
         gap: 8px;
-        flex-wrap: wrap;
-        margin-bottom: 2px;
+        margin-top: 10px;
+        font-size: 10px;
+        font-weight: 900;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+
+      .status-dot {
+        width: 8px;
+        height: 8px;
+        flex: 0 0 auto;
+        border-radius: 50%;
+        background: #2f83d2;
+        box-shadow: 0 0 0 3px rgba(47, 131, 210, 0.16);
+      }
+
+      .delivery-status.out-for-delivery .status-dot {
+        background: #c98500;
+        box-shadow: 0 0 0 3px rgba(201, 133, 0, 0.18);
+      }
+
+      .delivery-status.delivered .status-dot {
+        background: #2f8f57;
+        box-shadow: 0 0 0 3px rgba(47, 143, 87, 0.18);
+      }
+
+      .delivery-status.error .status-dot {
+        background: #9e2b2b;
+        box-shadow: 0 0 0 3px rgba(158, 43, 43, 0.18);
+      }
+
+      .barcode-section {
+        padding: 11px 14px 9px;
+        border-bottom: 2px solid var(--label-ink);
+      }
+
+      .barcode {
+        height: 64px;
+        margin-top: 4px;
+        background:
+          repeating-linear-gradient(
+            90deg,
+            #000 0 2px,
+            transparent 2px 4px,
+            #000 4px 5px,
+            transparent 5px 7px,
+            #000 7px 11px,
+            transparent 11px 13px,
+            #000 13px 14px,
+            transparent 14px 18px,
+            #000 18px 21px,
+            transparent 21px 24px
+          );
+      }
+
+      .barcode-number {
+        margin-top: 5px;
+        font-family: "Courier New", ui-monospace, monospace;
+        font-size: 10px;
+        font-weight: 900;
+        letter-spacing: 0.12em;
+        text-align: center;
+        word-break: break-all;
+      }
+
+      .tracking-event {
+        display: grid;
+        grid-template-columns: 92px 1fr;
+        min-height: 84px;
+        border-bottom: 2px solid var(--label-ink);
+      }
+
+      .event-code {
+        display: grid;
+        place-items: center;
+        padding: 10px;
+        border-right: 2px solid var(--label-ink);
+        background:
+          repeating-linear-gradient(
+            -45deg,
+            transparent 0 7px,
+            rgba(0, 0, 0, 0.035) 7px 8px
+          );
+        text-align: center;
+      }
+
+      .event-code strong {
+        display: block;
+        font-size: 22px;
+        line-height: 1;
+      }
+
+      .event-code span {
+        display: block;
+        margin-top: 5px;
+        color: var(--label-muted);
+        font-size: 8px;
+        font-weight: 900;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+
+      .event-details {
+        padding: 11px 12px;
+        min-width: 0;
+      }
+
+      .event-title {
+        margin: 0;
+        font-size: 14px;
+        font-weight: 900;
+        text-transform: uppercase;
+        line-height: 1.2;
+      }
+
+      .event-meta {
+        margin-top: 6px;
+        color: #444;
+        font-family: "Courier New", ui-monospace, monospace;
+        font-size: 11px;
+        font-weight: 700;
+        line-height: 1.45;
+        word-break: break-word;
+      }
+
+      .event-location {
+        color: var(--label-ink);
+        font-weight: 900;
+        text-transform: uppercase;
+      }
+
+      .label-footer {
+        display: grid;
+        grid-template-columns: 1fr 1fr 44px;
+        gap: 7px;
+        padding: 10px;
+        background: #eee;
+      }
+
+      .action-button {
+        min-height: 40px;
+        padding: 0 10px;
+        border: 1px solid #222;
+        border-radius: 3px;
+        background: #fff;
+        color: #111;
+        font-size: 11px;
+        font-weight: 900;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+        cursor: pointer;
+        transition: transform 130ms ease, background 130ms ease, opacity 130ms ease;
+      }
+
+      .action-button:hover:not(:disabled) {
+        transform: translateY(-1px);
+        background: #f4f4f4;
+      }
+
+      .action-button:disabled {
+        opacity: 0.55;
+        cursor: not-allowed;
+      }
+
+      .action-button.primary {
+        background: #111;
+        color: #fff;
+      }
+
+      .action-button.primary:hover:not(:disabled) {
+        background: #222;
+      }
+
+      .action-button.remove {
+        padding: 0;
+        border-color: #9e2b2b;
+        color: #9e2b2b;
+        font-size: 20px;
+        line-height: 1;
+      }
+
+      .action-button.remove:hover:not(:disabled) {
+        background: #9e2b2b;
+        color: #fff;
+      }
+
+      .package-card .discover-badge {
+        margin-top: 10px;
+        margin-left: 0;
+        width: fit-content;
+        color: #2f8f57;
+        background: color-mix(in srgb, #5dbe7a 16%, #fff);
+        border-color: color-mix(in srgb, #5dbe7a 65%, transparent);
       }
 
       .discover-badge {
@@ -4016,19 +4921,6 @@ class HomeDeliveryPanel extends HTMLElement {
         100% { box-shadow: 0 0 0 0 transparent; }
       }
 
-      .delivered-mark {
-        margin-left: auto;
-        font-size: 10px;
-        font-weight: 750;
-        letter-spacing: 0.08em;
-        text-transform: uppercase;
-        color: #3f9a5f;
-        border: 1px solid color-mix(in srgb, #5dbe7a 55%, transparent);
-        border-radius: 6px;
-        padding: 2px 6px;
-        transform: rotate(-2deg);
-      }
-
       .btn-discover {
         color: #3f9a5f;
         border-color: color-mix(in srgb, #5dbe7a 65%, var(--hd-border));
@@ -4048,50 +4940,34 @@ class HomeDeliveryPanel extends HTMLElement {
         letter-spacing: 0.02em;
       }
 
-      .package-tracking {
-        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, monospace;
-        font-size: 11px;
-        color: var(--hd-muted);
-        word-break: break-all;
-        min-width: 0;
-        flex: 1 1 120px;
-      }
+      @media (max-width: 420px) {
+        .pkg-label {
+          margin: 8px;
+        }
 
-      .package-meta {
-        font-size: 12px;
-        color: var(--hd-muted);
-        margin-top: var(--space-1);
-      }
+        .label-header {
+          grid-template-columns: 88px 1fr 52px;
+        }
 
-      .package-detail-text {
-        font-size: 12px;
-        margin-top: var(--space-2);
-        color: var(--hd-text);
-        opacity: 0.88;
-      }
+        .service-block strong {
+          font-size: 12px;
+        }
 
-      .package-latest {
-        font-size: 11px;
-        color: var(--hd-muted);
-        margin-top: var(--space-2);
-        display: flex;
-        flex-wrap: wrap;
-        gap: 6px 10px;
-      }
+        .recipient-name {
+          font-size: 20px;
+        }
 
-      .package-error {
-        font-size: 11px;
-        color: var(--hd-danger);
-        margin-top: var(--space-2);
-      }
+        .recipient-address {
+          font-size: 12px;
+        }
 
-      .package-actions {
-        display: flex;
-        gap: var(--space-2);
-        margin-top: var(--space-3);
-        padding-top: var(--space-2);
-        border-top: 1px solid var(--hd-border);
-        flex-wrap: wrap;
+        .tracking-event {
+          grid-template-columns: 78px 1fr;
+        }
+
+        .label-footer {
+          grid-template-columns: 1fr 1fr 40px;
+        }
       }
 
       .empty-state {
@@ -4611,6 +5487,344 @@ class HomeDeliveryPanel extends HTMLElement {
         margin-top: var(--space-4);
         padding-top: var(--space-4);
         border-top: 1px solid var(--hd-border);
+      }
+
+      /* ======================== Announcements (home-weather parity) ======================== */
+
+      .settings-pane[data-settings-pane="announcements"] {
+        gap: var(--space-3);
+      }
+
+      .collapsible-section {
+        background: var(--hd-surface);
+        border: 1px solid var(--hd-border);
+        border-radius: var(--radius-lg);
+        overflow: hidden;
+      }
+
+      .collapsible-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 14px 16px;
+        cursor: pointer;
+        gap: 12px;
+        user-select: none;
+      }
+
+      .collapsible-header:hover {
+        background: color-mix(in srgb, var(--hd-text) 4%, transparent);
+      }
+
+      .collapsible-header-left {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        flex: 1;
+        min-width: 0;
+      }
+
+      .collapsible-title {
+        font-size: 15px;
+        font-weight: 600;
+      }
+
+      .collapsible-subtitle {
+        font-size: 12px;
+        color: var(--hd-muted);
+        margin-top: 2px;
+      }
+
+      .collapsible-toggle {
+        flex-shrink: 0;
+        width: 36px;
+        height: 36px;
+        border: 1px solid var(--hd-border);
+        background: var(--hd-input-bg);
+        border-radius: var(--radius-sm);
+        color: var(--hd-muted);
+        cursor: pointer;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        padding: 0;
+      }
+
+      .collapsible-chevron {
+        width: 20px;
+        height: 20px;
+        transition: transform 0.2s ease;
+      }
+
+      .collapsible-section.open > .collapsible-header .collapsible-chevron {
+        transform: rotate(180deg);
+      }
+
+      .collapsible-content {
+        display: none;
+        flex-direction: column;
+        gap: var(--space-3);
+        padding: 0 16px 16px;
+        border-top: 1px solid var(--hd-border);
+        padding-top: 14px;
+      }
+
+      .collapsible-section.open > .collapsible-content {
+        display: flex;
+      }
+
+      .toggle-switch {
+        position: relative;
+        display: inline-block;
+        width: 44px;
+        height: 24px;
+        flex-shrink: 0;
+      }
+
+      .toggle-switch input {
+        opacity: 0;
+        width: 0;
+        height: 0;
+      }
+
+      .toggle-slider {
+        position: absolute;
+        cursor: pointer;
+        inset: 0;
+        background: var(--hd-input-bg);
+        border-radius: 24px;
+        transition: 0.2s;
+        border: 1px solid var(--hd-border);
+      }
+
+      .toggle-slider:before {
+        position: absolute;
+        content: "";
+        height: 18px;
+        width: 18px;
+        left: 2px;
+        bottom: 2px;
+        background: var(--hd-muted);
+        border-radius: 50%;
+        transition: 0.2s;
+      }
+
+      .toggle-switch input:checked + .toggle-slider {
+        background: var(--hd-accent);
+        border-color: var(--hd-accent);
+      }
+
+      .toggle-switch input:checked + .toggle-slider:before {
+        transform: translateX(20px);
+        background: #fff;
+      }
+
+      .settings-toggle-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 8px 0;
+      }
+
+      .inline-toggle-label {
+        font-size: 14px;
+        font-weight: 500;
+      }
+
+      .media-player-list {
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+      }
+
+      .settings-panel--player .collapsible-section {
+        background: color-mix(in srgb, var(--hd-text) 3%, var(--hd-surface));
+      }
+
+      .media-player-controls {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+      }
+
+      .media-player-controls select {
+        flex: 1;
+        min-width: 0;
+      }
+
+      .media-player-add-row {
+        align-items: center;
+        margin-top: 4px;
+      }
+
+      .media-player-add-row select {
+        flex: 1;
+        min-width: 0;
+      }
+
+      .playback-options-row {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 12px 16px;
+      }
+
+      .playback-options-row .form-group {
+        margin-bottom: 0;
+        flex: 0 1 148px;
+      }
+
+      .range-slider {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+      }
+
+      .range-slider input[type="range"] {
+        flex: 1;
+        accent-color: var(--hd-accent);
+      }
+
+      .range-value,
+      .per-speaker-volume-val {
+        font-size: 12px;
+        min-width: 36px;
+        text-align: right;
+        color: var(--hd-muted);
+      }
+
+      .media-player-actions,
+      .form-actions-row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        justify-content: flex-end;
+        padding-top: 8px;
+      }
+
+      .btn-secondary {
+        background: transparent;
+      }
+
+      .btn-icon {
+        white-space: nowrap;
+        flex-shrink: 0;
+      }
+
+      .test-tts-btn {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 6px;
+        padding: 8px 14px;
+        border-radius: var(--radius-sm);
+        background: var(--hd-accent);
+        border: 1px solid var(--hd-accent);
+        color: #fff;
+        font-size: 13px;
+        font-weight: 500;
+        cursor: pointer;
+      }
+
+      .test-tts-btn:hover {
+        filter: brightness(1.05);
+      }
+
+      .test-tts-btn:disabled {
+        opacity: 0.55;
+        cursor: not-allowed;
+      }
+
+      .subsection-title {
+        font-size: 12px;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        color: var(--hd-muted);
+        margin-top: 4px;
+      }
+
+      .per-speaker-header {
+        display: grid;
+        grid-template-columns: 1fr 140px 60px;
+        gap: 8px;
+        padding: 6px 12px;
+        font-size: 11px;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        color: var(--hd-muted);
+        border-bottom: 1px solid var(--hd-border);
+      }
+
+      .per-speaker-header span:last-child {
+        text-align: center;
+      }
+
+      .per-speaker-list {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+      }
+
+      .per-speaker-row {
+        display: grid;
+        grid-template-columns: 1fr auto;
+        gap: 8px;
+        align-items: center;
+        padding: 8px 12px;
+        background: color-mix(in srgb, var(--hd-text) 4%, transparent);
+        border-radius: 8px;
+      }
+
+      .per-speaker-name {
+        font-size: 13px;
+        font-weight: 500;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .per-speaker-controls {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+
+      .per-speaker-volume {
+        width: 80px;
+        height: 6px;
+        accent-color: var(--hd-accent);
+        cursor: pointer;
+      }
+
+      .per-speaker-volume:disabled {
+        opacity: 0.4;
+        cursor: not-allowed;
+      }
+
+      .per-speaker-bypass-label {
+        font-size: 11px;
+        color: var(--hd-muted);
+      }
+
+      .per-speaker-empty {
+        padding: 16px;
+        text-align: center;
+        background: color-mix(in srgb, var(--hd-text) 4%, transparent);
+        border-radius: 8px;
+      }
+
+      .per-speaker-link {
+        display: block;
+        margin: 8px auto 0;
+        background: none;
+        border: none;
+        color: var(--hd-accent);
+        cursor: pointer;
+        font-size: 13px;
+        text-decoration: underline;
       }
 
       /* ======================== Theme Toggle ======================== */
