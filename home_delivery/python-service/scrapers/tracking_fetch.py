@@ -21,11 +21,13 @@ from carrier_detect import (
 from .base import get_page, reset_browser_on_failure
 from .navigation import (
     HTTP2_ERROR_MARKERS,
-    dismiss_ups_overlays,
+    _ups_is_skeleton_page,
     goto_tracking_page,
+    prepare_ups_tracking_page,
     wait_for_estes_tracking,
     wait_for_ups_tracking,
     wait_for_usps_tracking,
+    warmup_ups_session,
 )
 from .parsers import parse_estes_tracking, parse_ups_tracking, parse_usps_tracking
 
@@ -67,16 +69,63 @@ async def _fetch_usps(page, tracking_number: str) -> dict[str, Any]:
     return {"error": last_error}
 
 
+async def _ups_scrape_ready_page(
+    page,
+    tracking_number: str,
+    *,
+    wait_ms: int = 90000,
+) -> dict[str, Any] | None:
+    """Navigate/wait/parse when UPS results are ready; None if still skeleton."""
+    await prepare_ups_tracking_page(page, tracking_number)
+
+    if await wait_for_ups_tracking(page, tracking_number, timeout_ms=wait_ms):
+        return await parse_ups_tracking(page)
+
+    if await _ups_is_skeleton_page(page):
+        logger.info("UPS still skeleton for %s after wait — reloading once", tracking_number)
+        try:
+            await page.reload(wait_until="domcontentloaded", timeout=45000)
+        except Exception as exc:
+            logger.warning("UPS reload failed for %s: %s", tracking_number, exc)
+            return None
+
+        await prepare_ups_tracking_page(page, tracking_number)
+        if await wait_for_ups_tracking(page, tracking_number, timeout_ms=60000):
+            return await parse_ups_tracking(page)
+
+    return None
+
+
 async def _fetch_ups(page, tracking_number: str) -> dict[str, Any]:
-    """Fetch UPS tracking data from a ready page."""
-    url = get_tracking_url("ups", tracking_number)
-    await goto_tracking_page(page, url, timeout_ms=45000)
-    await dismiss_ups_overlays(page)
+    """Fetch UPS tracking data — multi-pass for HA Linux containers."""
+    urls = [
+        get_tracking_url("ups", tracking_number),
+        f"https://www.ups.com/track?tracknum={tracking_number}&loc=en_US",
+    ]
 
-    if not await wait_for_ups_tracking(page, tracking_number, timeout_ms=45000):
-        return {"error": "UPS tracking content not found"}
+    async def _try_urls(*, warmed: bool) -> dict[str, Any] | None:
+        if warmed:
+            await warmup_ups_session(page)
 
-    return await parse_ups_tracking(page)
+        for index, url in enumerate(urls):
+            await goto_tracking_page(page, url, timeout_ms=60000)
+            result = await _ups_scrape_ready_page(page, tracking_number)
+            if result:
+                return result
+            if index + 1 < len(urls):
+                logger.info("UPS primary URL missed for %s; trying alternate", tracking_number)
+        return None
+
+    parsed = await _try_urls(warmed=False)
+    if parsed:
+        return parsed
+
+    logger.info("UPS direct fetch missed for %s; retrying after warm-up session", tracking_number)
+    parsed = await _try_urls(warmed=True)
+    if parsed:
+        return parsed
+
+    return {"error": "UPS tracking content not found"}
 
 
 async def _fetch_fedex(page, tracking_number: str) -> dict[str, Any]:
@@ -144,7 +193,8 @@ async def fetch_carrier_tracking(
         return await fetch_fn(None, normalized)
 
     async def _do_fetch() -> dict[str, Any]:
-        async with get_page(timeout_ms=70000) as page:
+        page_timeout_ms = 120000 if carrier == "ups" else 70000
+        async with get_page(timeout_ms=page_timeout_ms) as page:
             return await fetch_fn(page, normalized)
 
     def _needs_browser_retry(payload: dict[str, Any]) -> bool:
@@ -191,22 +241,28 @@ async def fetch_carrier_tracking(
         and _needs_browser_retry(result)
         and not (result.get("events") or [])
     ):
-        logger.warning(
-            "%s fetch blocked (%s); resetting browser and retrying once",
-            carrier.upper(),
-            result.get("error"),
-        )
-        await reset_browser_on_failure()
-        try:
-            result = await _do_fetch()
-        except Exception as retry_exc:
-            logger.error(
-                "%s browser-reset retry failed for %s: %s",
+        max_resets = 2 if carrier == "ups" else 1
+        for reset_num in range(max_resets):
+            logger.warning(
+                "%s fetch blocked (%s); resetting browser and retrying (%s/%s)",
                 carrier.upper(),
-                normalized,
-                retry_exc,
+                result.get("error"),
+                reset_num + 1,
+                max_resets,
             )
-            return {"error": str(retry_exc)}
+            await reset_browser_on_failure()
+            try:
+                result = await _do_fetch()
+            except Exception as retry_exc:
+                logger.error(
+                    "%s browser-reset retry failed for %s: %s",
+                    carrier.upper(),
+                    normalized,
+                    retry_exc,
+                )
+                return {"error": str(retry_exc)}
+            if not _needs_browser_retry(result) or (result.get("events") or []):
+                break
 
     events = result.get("events") or []
     logger.info(

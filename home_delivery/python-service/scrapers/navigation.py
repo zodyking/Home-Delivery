@@ -202,6 +202,7 @@ async def dismiss_ups_overlays(page: Page) -> None:
         'button:has-text("Dismiss Service Alert")',
         "#onetrust-accept-btn-handler",
         'button:has-text("Accept All Cookies")',
+        'button:has-text("Accept All")',
         'button:has-text("Accept Cookies")',
         'button:has-text("I Accept")',
         'button[aria-label="Close chat window"]',
@@ -209,6 +210,16 @@ async def dismiss_ups_overlays(page: Page) -> None:
     ):
         loc = page.locator(selector)
         try:
+            if await loc.count() == 0:
+                continue
+            await loc.first.click(timeout=1500, force=True)
+            await page.wait_for_timeout(400)
+        except Exception:
+            continue
+
+    for label in ("Accept All", "Accept All Cookies", "Accept Cookies", "I Accept"):
+        try:
+            loc = page.get_by_role("button", name=label)
             if await loc.count() == 0:
                 continue
             await loc.first.click(timeout=1500, force=True)
@@ -228,21 +239,74 @@ async def dismiss_ups_overlays(page: Page) -> None:
         pass
 
 
+async def _ups_is_skeleton_page(page: Page) -> bool:
+    """True when UPS Angular shell loaded but Track/GetStatus never populated."""
+    try:
+        return bool(
+            await page.evaluate(
+                """() => {
+                  const meta = document.querySelector('meta[name="stapp-tracknum"]');
+                  if (meta) {
+                    const val = (meta.getAttribute("content") || "").trim().toLowerCase();
+                    if (!val || val === "null") return true;
+                  }
+                  const skeleton = document.querySelector(".skeleton, [class*='skeleton']");
+                  const hasResults = !!(
+                    document.getElementById("stApp_copytrackingnumber") ||
+                    document.querySelector("ups-shipment-progress") ||
+                    document.getElementById("shipProg_act_Date0")
+                  );
+                  return !!skeleton && !hasResults;
+                }"""
+            )
+        )
+    except Exception:
+        return False
+
+
+async def prepare_ups_tracking_page(page: Page, tracking_number: str) -> None:
+    """
+    Dismiss overlays and give OneTrust / service-alert chrome time to appear.
+
+    HA Linux containers often stay on skeleton HTML until cookies are accepted.
+    """
+    _ = tracking_number
+    try:
+        await page.wait_for_function(
+            """() => {
+                return !!document.querySelector('#onetrust-accept-btn-handler')
+                    || !!document.querySelector('#onetrust-banner-sdk')
+                    || !!document.getElementById('stApp_copytrackingnumber')
+                    || !!document.querySelector('button, [role="button"]');
+            }""",
+            timeout=12000,
+        )
+    except Exception:
+        pass
+
+    await dismiss_ups_overlays(page)
+    await page.wait_for_timeout(600)
+    await dismiss_ups_overlays(page)
+
+
 async def warmup_ups_session(page: Page) -> None:
     """
     Visit ups.com first so track-details XHR looks same-site and Akamai/OneTrust
     can mint cookies before the tracking deep-link.
     """
-    try:
-        await page.goto(
-            "https://www.ups.com/",
-            wait_until="domcontentloaded",
-            timeout=45000,
-        )
-        await dismiss_ups_overlays(page)
-        await page.wait_for_timeout(1200)
-    except Exception as exc:
-        logger.warning("UPS warm-up visit failed (continuing): %s", exc)
+    for wait_until in ("commit", "domcontentloaded"):
+        try:
+            await page.goto(
+                "https://www.ups.com/",
+                wait_until=wait_until,
+                timeout=20000,
+            )
+            await dismiss_ups_overlays(page)
+            await page.wait_for_timeout(1000)
+            logger.info("UPS warm-up visit succeeded (wait=%s)", wait_until)
+            return
+        except Exception as exc:
+            logger.warning("UPS warm-up visit failed (wait=%s): %s", wait_until, exc)
 
 
 def _ups_tracking_ready_js() -> str:
@@ -277,7 +341,7 @@ def _ups_tracking_ready_js() -> str:
 async def wait_for_ups_tracking(
     page: Page,
     tracking_number: str,
-    timeout_ms: int = 60000,
+    timeout_ms: int = 90000,
 ) -> bool:
     """
     Wait until the UPS tracking results UI is actually ready.
@@ -288,16 +352,62 @@ async def wait_for_ups_tracking(
     _ = tracking_number  # call-site compatibility; readiness is DOM-based
     deadline = time.monotonic() + (timeout_ms / 1000)
     ready_js = _ups_tracking_ready_js()
+    get_status_seen = False
+    reload_attempted = False
+    skeleton_since: float | None = None
 
-    while time.monotonic() < deadline:
+    def _track_getstatus(resp) -> None:
+        nonlocal get_status_seen
         try:
-            if await page.evaluate(ready_js):
-                return True
+            url = resp.url
+            if "GetStatus" in url and resp.status == 200:
+                get_status_seen = True
         except Exception:
             pass
 
-        await dismiss_ups_overlays(page)
-        await page.wait_for_timeout(350)
+    page.on("response", _track_getstatus)
+
+    try:
+        while time.monotonic() < deadline:
+            try:
+                if await page.evaluate(ready_js):
+                    return True
+            except Exception:
+                pass
+
+            if get_status_seen:
+                # API returned — give Angular a moment to paint results.
+                await page.wait_for_timeout(1200)
+                try:
+                    if await page.evaluate(ready_js):
+                        return True
+                except Exception:
+                    pass
+
+            if await _ups_is_skeleton_page(page):
+                now = time.monotonic()
+                if skeleton_since is None:
+                    skeleton_since = now
+                elif not reload_attempted and now - skeleton_since > 12:
+                    reload_attempted = True
+                    logger.info("UPS skeleton persisted 12s — reloading track page")
+                    try:
+                        await page.reload(wait_until="domcontentloaded", timeout=45000)
+                        await prepare_ups_tracking_page(page, tracking_number)
+                        skeleton_since = None
+                        get_status_seen = False
+                    except Exception as exc:
+                        logger.warning("UPS skeleton reload failed: %s", exc)
+            else:
+                skeleton_since = None
+
+            await dismiss_ups_overlays(page)
+            await page.wait_for_timeout(350)
+    finally:
+        try:
+            page.remove_listener("response", _track_getstatus)
+        except Exception:
+            pass
 
     selectors = (
         "#shipProg_act_Date0",
