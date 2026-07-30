@@ -1,0 +1,33 @@
+#!/command/with-contenv bashio
+# shellcheck shell=bash
+# ==============================================================================
+# Home Delivery - Init script
+# ==============================================================================
+
+bashio::log.info "Home Delivery initializing..."
+
+# Set up environment variables
+export DATA_DIR=/config
+
+# Create necessary directories
+mkdir -p /config/www/home_delivery
+mkdir -p /config/mail_images
+
+# ==============================================================================
+# Install Home Delivery integration to Home Assistant custom_components
+# ==============================================================================
+INTEGRATION_SRC="/app/integration/home_delivery"
+INTEGRATION_DST="/homeassistant/custom_components/home_delivery"
+
+if [ -d "$INTEGRATION_SRC" ]; then
+    bashio::log.info "Installing Home Delivery integration..."
+    mkdir -p /homeassistant/custom_components
+    # Remove existing to avoid nested folder issue, then copy fresh
+    rm -rf "$INTEGRATION_DST"
+    cp -r "$INTEGRATION_SRC" "$INTEGRATION_DST"
+    bashio::log.info "Integration installed to $INTEGRATION_DST"
+else
+    bashio::log.warning "Integration source not found at $INTEGRATION_SRC"
+fi
+
+bashio::log.info "Environment configured, waiting for services to start..."

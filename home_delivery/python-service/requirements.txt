@@ -1,0 +1,9 @@
+fastapi>=0.115.0
+uvicorn[standard]>=0.32.0
+playwright>=1.48.0
+python-multipart>=0.0.12
+pydantic>=2.10.0
+aiohttp>=3.11.0
+imageio>=2.35.0
+Pillow>=10.4.0
+python-resize-image>=1.1.20

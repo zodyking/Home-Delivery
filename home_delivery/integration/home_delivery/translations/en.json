@@ -1,0 +1,20 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Home Delivery Setup",
+        "description": "Connect to the Home Delivery add-on to track packages and mail.",
+        "data": {
+          "addon_url": "Add-on URL"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Failed to connect to the Home Delivery add-on. Make sure it is running.",
+      "unknown": "An unexpected error occurred."
+    },
+    "abort": {
+      "already_configured": "Home Delivery is already configured."
+    }
+  }
+}

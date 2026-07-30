@@ -1,0 +1,12 @@
+{
+  "domain": "home_delivery",
+  "name": "Home Delivery",
+  "version": "1.0.0",
+  "documentation": "https://github.com/zodyking/Home-Delivery",
+  "issue_tracker": "https://github.com/zodyking/Home-Delivery/issues",
+  "dependencies": [],
+  "codeowners": ["@zodyking"],
+  "requirements": ["aiohttp>=3.8.0"],
+  "iot_class": "local_polling",
+  "config_flow": true
+}

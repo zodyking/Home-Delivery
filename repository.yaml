@@ -1,0 +1,4 @@
+# https://developers.home-assistant.io/docs/add-ons/repository#repository-configuration
+name: Home Delivery
+url: https://github.com/zodyking/Home-Delivery
+maintainer: zodyking
