@@ -31,7 +31,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Code version for deployment verification
-CODE_VERSION = "0.0.7"
+CODE_VERSION = "0.0.8"
 
 app = FastAPI(title="Home Delivery API")
 
@@ -370,6 +370,8 @@ async def get_mail():
         "configured": mail_state.get("configured", False),
         "last_check": mail_state.get("last_check"),
         "piece_count": mail_state.get("piece_count", 0),
+        "mailpiece_count": mail_state.get("mailpiece_count", 0),
+        "package_count": mail_state.get("package_count", 0),
         "gif_url": gif_url,
         "accounts": [
             {
@@ -378,6 +380,8 @@ async def get_mail():
                 "enabled": a.get("enabled", True),
                 "imap_user": a.get("imap_user"),
                 "piece_count": a.get("piece_count", 0),
+                "mailpiece_count": a.get("mailpiece_count", a.get("piece_count", 0)),
+                "package_count": a.get("package_count", 0),
                 "last_check": a.get("last_check"),
                 "last_error": a.get("last_error"),
                 "gif_filename": a.get("gif_filename"),
@@ -471,11 +475,15 @@ async def _sync_mail_accounts(account_ids: list[str] | None = None) -> dict[str,
         try:
             result = await check_informed_delivery(account)
             piece_count = result.get("piece_count", 0)
+            mailpiece_count = result.get("mailpiece_count", piece_count)
+            package_count = result.get("package_count", 0)
             gif_filename = result.get("gif_filename")
             preview_images = result.get("preview_images") or []
             await config_store.update_mail_state(
                 account_id=account_id,
                 piece_count=piece_count,
+                mailpiece_count=mailpiece_count,
+                package_count=package_count,
                 gif_filename=gif_filename,
                 preview_images=preview_images,
                 last_error=None,
@@ -488,6 +496,8 @@ async def _sync_mail_accounts(account_ids: list[str] | None = None) -> dict[str,
                 "label": label,
                 "success": True,
                 "piece_count": piece_count,
+                "mailpiece_count": mailpiece_count,
+                "package_count": package_count,
                 "gif_url": _mail_image_url(gif_filename),
                 "preview_images": _mail_preview_payload(preview_images),
             })
@@ -496,6 +506,8 @@ async def _sync_mail_accounts(account_ids: list[str] | None = None) -> dict[str,
             await config_store.update_mail_state(
                 account_id=account_id,
                 piece_count=account.get("piece_count", 0),
+                mailpiece_count=account.get("mailpiece_count", account.get("piece_count", 0)),
+                package_count=account.get("package_count", 0),
                 gif_filename=account.get("gif_filename"),
                 preview_images=account.get("preview_images") or [],
                 last_error=str(e),

@@ -173,6 +173,8 @@ async def _poll_mail() -> None:
                 await config_store.update_mail_state(
                     account_id=account["id"],
                     piece_count=piece_count,
+                    mailpiece_count=result.get("mailpiece_count", piece_count),
+                    package_count=result.get("package_count", 0),
                     gif_filename=result.get("gif_filename"),
                     preview_images=result.get("preview_images") or [],
                     last_error=None,
@@ -182,6 +184,8 @@ async def _poll_mail() -> None:
                 await config_store.update_mail_state(
                     account_id=account["id"],
                     piece_count=account.get("piece_count", 0),
+                    mailpiece_count=account.get("mailpiece_count", account.get("piece_count", 0)),
+                    package_count=account.get("package_count", 0),
                     gif_filename=account.get("gif_filename"),
                     preview_images=account.get("preview_images") or [],
                     last_error=str(e),

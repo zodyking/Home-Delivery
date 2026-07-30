@@ -100,6 +100,8 @@ def _aggregate_mail_state(accounts: list[dict[str, Any]]) -> dict[str, Any]:
     active = enabled_accounts if enabled_accounts else accounts
 
     piece_count = sum(int(a.get("piece_count") or 0) for a in active)
+    mailpiece_count = sum(int(a.get("mailpiece_count") or 0) for a in active)
+    package_count = sum(int(a.get("package_count") or 0) for a in active)
     last_checks = [a.get("last_check") for a in active if a.get("last_check")]
     last_check = max(last_checks) if last_checks else None
 
@@ -119,6 +121,8 @@ def _aggregate_mail_state(accounts: list[dict[str, Any]]) -> dict[str, Any]:
         "configured": configured,
         "enabled": enabled,
         "piece_count": piece_count,
+        "mailpiece_count": mailpiece_count,
+        "package_count": package_count,
         "last_check": last_check,
         "gif_filename": gif_filename,
         "accounts": accounts,
@@ -288,11 +292,15 @@ class ConfigStore:
         piece_count: int,
         gif_filename: str | None = None,
         preview_images: list[str] | None = None,
+        mailpiece_count: int | None = None,
+        package_count: int | None = None,
         last_error: str | None = None,
     ) -> None:
         """Update mail state for a specific account after IMAP check."""
         updates: dict[str, Any] = {
             "piece_count": piece_count,
+            "mailpiece_count": mailpiece_count if mailpiece_count is not None else piece_count,
+            "package_count": package_count or 0,
             "gif_filename": gif_filename,
             "preview_images": preview_images or [],
             "last_check": datetime.now(timezone.utc).isoformat(),

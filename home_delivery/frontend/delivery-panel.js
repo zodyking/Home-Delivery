@@ -2,7 +2,7 @@
  * Home Delivery Panel - Vanilla JS for HA custom panel / standalone Ingress
  * Design aligned with home-weather: topbar + gear settings, dashboard layout.
  */
-const PANEL_VERSION = "0.0.7";
+const PANEL_VERSION = "0.0.8";
 
 class HomeDeliveryPanel extends HTMLElement {
   constructor() {
@@ -113,6 +113,48 @@ class HomeDeliveryPanel extends HTMLElement {
     const list = Array.isArray(accounts) ? accounts : [];
     const home = this._getHomeMailAccount(list);
     return list.filter((account) => account.enabled !== false && account.id !== home?.id);
+  }
+
+  _getMailCounts(account) {
+    if (!account) {
+      return { mailpieces: 0, packages: 0, total: 0 };
+    }
+
+    const hasSplit = account.mailpiece_count != null || account.package_count != null;
+    if (hasSplit) {
+      const mailpieces = Number(account.mailpiece_count) || 0;
+      const packages = Number(account.package_count) || 0;
+      return { mailpieces, packages, total: mailpieces + packages };
+    }
+
+    const total = Number(account.piece_count) || 0;
+    return { mailpieces: total, packages: 0, total };
+  }
+
+  _formatMailCountSummary(counts) {
+    const parts = [];
+    if (counts.mailpieces > 0) {
+      parts.push(`${counts.mailpieces} mailpiece${counts.mailpieces === 1 ? "" : "s"}`);
+    }
+    if (counts.packages > 0) {
+      parts.push(`${counts.packages} inbound package${counts.packages === 1 ? "" : "s"}`);
+    }
+    return parts.length ? parts.join(", ") : "nothing arriving today";
+  }
+
+  _renderMailCountBlocks(counts) {
+    return `
+      <div class="mail-hero-counts" aria-label="Today's mail and inbound packages">
+        <div class="mail-count-block">
+          <div class="mail-count-large">${counts.mailpieces}</div>
+          <div class="mail-count-label">mailpiece${counts.mailpieces === 1 ? "" : "s"}</div>
+        </div>
+        <div class="mail-count-block">
+          <div class="mail-count-large mail-count-large--package">${counts.packages}</div>
+          <div class="mail-count-label">inbound package${counts.packages === 1 ? "" : "s"}</div>
+        </div>
+      </div>
+    `;
   }
 
   _mailPreviewHtml(account, label = "Mail preview") {
@@ -326,8 +368,13 @@ class HomeDeliveryPanel extends HTMLElement {
     this._refreshingAll = true;
     this._render();
     try {
-      const [mailResp] = await Promise.all([
-        this._fetchApi("/api/mail/sync", { method: "POST", body: "{}" }).then(() => this._fetchApi("/api/mail")).catch(() => this._mailState),
+      let mailResp = this._mailState;
+      await Promise.all([
+        this._fetchApi("/api/mail/sync", { method: "POST", body: "{}" })
+          .then(async () => {
+            mailResp = await this._fetchApi("/api/mail");
+          })
+          .catch(() => {}),
         ...this._packages.filter(p => !p.delivered).map(p =>
           this._fetchApi(`/api/packages/${p.id}/refresh`, { method: "POST" })
             .then(resp => { if (resp.package) { const idx = this._packages.findIndex(x => x.id === p.id); if (idx >= 0) this._packages[idx] = resp.package; } })
@@ -335,7 +382,9 @@ class HomeDeliveryPanel extends HTMLElement {
         ),
       ]);
       if (mailResp) this._mailState = mailResp;
-      this._showToast("Refreshed");
+      const home = this._getHomeMailAccount(mailResp?.accounts || []);
+      const summary = home ? this._formatMailCountSummary(this._getMailCounts(home)) : "Refreshed";
+      this._showToast(summary === "Refreshed" ? summary : `Synced — ${summary}`);
     } catch (err) {
       this._showToast(err.message, { error: true });
     } finally {
@@ -710,7 +759,10 @@ class HomeDeliveryPanel extends HTMLElement {
       if (failed.length > 0) {
         this._showToast(failed[0].error || "Sync failed", { error: true });
       } else {
-        this._showToast(`Synced — ${resp.piece_count || 0} pieces today`);
+        this._showToast(`Synced — ${this._formatMailCountSummary(this._getMailCounts(
+          (mailResp.accounts || []).find((a) => a.id === accountId)
+            || this._getHomeMailAccount(mailResp.accounts || [])
+        ))}`);
       }
     } catch (err) {
       this._showToast(err.message, { error: true });
@@ -1060,8 +1112,8 @@ class HomeDeliveryPanel extends HTMLElement {
   _renderTopbarActions() {
     return `
       <div class="status-card">
-        <button class="icon-btn" id="refresh-btn" aria-label="Refresh" ${this._refreshingAll ? "disabled" : ""}>
-          <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor" class="${this._refreshingAll ? "spinning" : ""}"><path d="M17.65 6.35A7.958 7.958 0 0012 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08A5.99 5.99 0 0112 18c-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/></svg>
+        <button class="icon-btn" id="refresh-btn" aria-label="Refresh" ${this._refreshingAll || this._mailSyncing ? "disabled" : ""}>
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor" class="${this._refreshingAll || this._mailSyncing ? "spinning" : ""}"><path d="M17.65 6.35A7.958 7.958 0 0012 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08A5.99 5.99 0 0112 18c-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/></svg>
         </button>
         <button class="icon-btn" id="gear-btn" aria-label="Settings">
           <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 00.12-.61l-1.92-3.32a.488.488 0 00-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.484.484 0 00-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58a.49.49 0 00-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/></svg>
@@ -1171,22 +1223,23 @@ class HomeDeliveryPanel extends HTMLElement {
     const accounts = mail.accounts || [];
     const home = this._getHomeMailAccount(accounts);
     const active = this._packages.filter(p => !p.delivered);
-    const delivered = this._packages.filter(p => p.delivered);
-    const mailCount = home ? (home.piece_count ?? 0) : (mail.configured ? 0 : "—");
+    const mailCounts = this._getMailCounts(home);
+    const inboundCount = home ? mailCounts.packages : (mail.configured ? 0 : "—");
+    const mailpieceCount = home ? mailCounts.mailpieces : (mail.configured ? 0 : "—");
 
     return `
       <div class="stats-strip" role="list" aria-label="Delivery overview">
         <article class="stat-glass" role="listitem">
-          <div class="stat-glass-value">${mailCount}</div>
-          <div class="stat-glass-label">Mail today</div>
+          <div class="stat-glass-value">${mailpieceCount}</div>
+          <div class="stat-glass-label">Mailpieces</div>
+        </article>
+        <article class="stat-glass" role="listitem">
+          <div class="stat-glass-value">${inboundCount}</div>
+          <div class="stat-glass-label">Inbound packages</div>
         </article>
         <article class="stat-glass" role="listitem">
           <div class="stat-glass-value">${active.length}</div>
-          <div class="stat-glass-label">Active packages</div>
-        </article>
-        <article class="stat-glass" role="listitem">
-          <div class="stat-glass-value">${delivered.length}</div>
-          <div class="stat-glass-label">Delivered</div>
+          <div class="stat-glass-label">Active tracking</div>
         </article>
       </div>
     `;
@@ -1217,7 +1270,7 @@ class HomeDeliveryPanel extends HTMLElement {
       ? new Date(account.last_check).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })
       : "";
     const label = account.label || account.imap_user || "Address";
-    const syncing = this._mailSyncing && this._mailSyncAccountId === account.id;
+    const counts = this._getMailCounts(account);
 
     return `
       <article class="glass card mail-other-card ${account.last_error ? "has-error" : ""}">
@@ -1226,15 +1279,16 @@ class HomeDeliveryPanel extends HTMLElement {
             <div class="mail-other-label">${this._esc(label)}</div>
             ${lastCheckStr ? `<div class="mail-other-meta">Last checked: ${lastCheckStr}</div>` : ""}
           </div>
-          <button class="btn btn-sm btn-ghost" data-action="refresh-mail" data-id="${account.id}" ${syncing ? "disabled" : ""}>
-            ${syncing ? "..." : "Check"}
-          </button>
+        </div>
+        <div class="mail-other-preview">
+          ${this._mailPreviewHtml(account, `${label} mail preview`)}
         </div>
         <div class="mail-other-body">
-          <div class="mail-other-count">${account.piece_count || 0}</div>
-          <div class="mail-other-count-label">pieces arriving</div>
+          <div class="mail-other-count">${counts.mailpieces}</div>
+          <div class="mail-other-count-label">mailpieces</div>
+          <div class="mail-other-count mail-other-count--package">${counts.packages}</div>
+          <div class="mail-other-count-label">inbound packages</div>
         </div>
-        ${this._mailPreviewHtml(account, `${label} mail preview`)}
         ${account.last_error ? `<div class="mail-other-error">${this._esc(account.last_error)}</div>` : ""}
       </article>
     `;
@@ -1266,8 +1320,7 @@ class HomeDeliveryPanel extends HTMLElement {
       ? new Date(home.last_check).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })
       : "";
     const subLabel = home?.label || "Home";
-    const pieceCount = home?.piece_count || 0;
-    const homeSyncing = this._mailSyncing && (!this._mailSyncAccountId || this._mailSyncAccountId === home?.id);
+    const counts = this._getMailCounts(home);
 
     return `
       <article class="glass card mail-hero-card">
@@ -1279,16 +1332,12 @@ class HomeDeliveryPanel extends HTMLElement {
               <div class="card-title">Mail Today</div>
               <div class="card-sub">${this._esc(subLabel)}</div>
             </div>
-            <button class="btn btn-sm btn-ghost" data-action="refresh-mail" ${home?.id ? `data-id="${home.id}"` : ""} ${homeSyncing ? "disabled" : ""}>
-              ${homeSyncing ? "Checking..." : "Check Now"}
-            </button>
           </div>
           <div class="mail-hero-stage">
-            <div class="mail-hero-main">
-              <div class="mail-count-large">${pieceCount}</div>
-              <div class="mail-count-label">pieces arriving</div>
+            <div class="mail-hero-preview">
+              ${this._mailPreviewHtml(home, `${subLabel} mail preview`)}
             </div>
-            ${this._mailPreviewHtml(home, `${subLabel} mail preview`)}
+            ${this._renderMailCountBlocks(counts)}
           </div>
           ${lastCheckStr ? `<div class="mail-meta">Last checked: ${lastCheckStr}</div>` : ""}
           ${home?.last_error ? `<div class="mail-meta mail-meta-warn">${this._esc(home.last_error)}</div>` : ""}
@@ -2646,20 +2695,38 @@ class HomeDeliveryPanel extends HTMLElement {
       }
 
       .mail-hero-stage {
-        display: grid;
-        grid-template-columns: minmax(0, 1fr) auto;
-        align-items: center;
+        display: flex;
+        flex-direction: column;
+        align-items: stretch;
         gap: var(--space-4);
         min-width: 0;
       }
 
-      @media (max-width: 560px) {
-        .mail-hero-stage {
-          grid-template-columns: 1fr;
-        }
+      .mail-hero-preview {
+        width: 100%;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        min-height: clamp(160px, 36vw, 260px);
+      }
 
-        .mail-preview {
-          max-width: none;
+      .mail-hero-counts {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: var(--space-3);
+      }
+
+      .mail-count-block {
+        text-align: center;
+        padding: var(--space-3);
+        border-radius: var(--radius-md);
+        background: rgba(255, 255, 255, 0.03);
+        border: 1px solid var(--hd-border);
+      }
+
+      @media (max-width: 560px) {
+        .mail-hero-counts {
+          grid-template-columns: 1fr 1fr;
         }
       }
 
@@ -2697,25 +2764,34 @@ class HomeDeliveryPanel extends HTMLElement {
         margin-top: var(--space-1);
       }
 
+      .mail-count-large--package {
+        color: #7eb8ff;
+      }
+
       .mail-preview {
+        width: 100%;
         min-width: 0;
-        max-width: min(100%, 320px);
-        justify-self: end;
+        max-width: 100%;
       }
 
       .mail-preview img {
         width: 100%;
+        max-height: clamp(160px, 36vw, 260px);
+        object-fit: contain;
+        object-position: center;
         border-radius: var(--radius-md);
         border: 1px solid var(--hd-border);
         box-shadow: var(--shadow-md);
+        background: #fff;
       }
 
       .mail-preview--placeholder {
         display: flex;
         align-items: center;
         justify-content: center;
-        width: clamp(120px, 28vw, 180px);
-        aspect-ratio: 724 / 320;
+        width: 100%;
+        min-height: clamp(160px, 36vw, 260px);
+        aspect-ratio: auto;
         border-radius: var(--radius-md);
         border: 1px dashed var(--hd-border-strong);
         background: var(--hd-elevated);
@@ -2753,8 +2829,8 @@ class HomeDeliveryPanel extends HTMLElement {
         position: relative;
         width: 100%;
         min-width: 0;
-        max-width: min(100%, 320px);
-        justify-self: end;
+        max-width: 100%;
+        min-height: clamp(160px, 36vw, 260px);
         aspect-ratio: 724 / 320;
         border-radius: var(--radius-md);
         overflow: hidden;
@@ -2892,10 +2968,15 @@ class HomeDeliveryPanel extends HTMLElement {
         margin-top: 2px;
       }
 
+      .mail-other-preview {
+        width: 100%;
+      }
+
       .mail-other-body {
-        display: flex;
-        align-items: baseline;
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
         gap: var(--space-2);
+        text-align: center;
       }
 
       .mail-other-count {
@@ -2906,14 +2987,20 @@ class HomeDeliveryPanel extends HTMLElement {
         font-variant-numeric: tabular-nums;
       }
 
+      .mail-other-count--package {
+        color: #7eb8ff;
+      }
+
       .mail-other-count-label {
         font-size: 12px;
         color: var(--hd-muted);
+        margin-bottom: var(--space-1);
       }
 
-      .mail-other-card .mail-preview {
+      .mail-other-card .mail-preview,
+      .mail-other-card .mail-carousel {
         max-width: none;
-        justify-self: stretch;
+        width: 100%;
       }
 
       .mail-other-card .mail-preview img {

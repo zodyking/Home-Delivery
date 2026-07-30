@@ -26,8 +26,14 @@ USPS_SENDERS = [
     "USPSInformeddelivery@informeddelivery.usps.com",
 ]
 
-# Subject for daily digest
-DIGEST_SUBJECT = "Your Daily Digest"
+# Subject for daily digest and morning notification emails
+INFORMED_DELIVERY_SUBJECTS = [
+    "Your Daily Digest",
+    "COMING TO YOU SOON",
+]
+
+# Legacy alias
+DIGEST_SUBJECT = INFORMED_DELIVERY_SUBJECTS[0]
 
 # Images to filter out (not actual mail pieces)
 FILTER_PATTERNS = [
@@ -49,18 +55,21 @@ def _get_today_imap_date() -> str:
     return datetime.now().strftime("%d-%b-%Y")
 
 
-def _build_search_query(senders: list[str], subject: str, since_date: str) -> str:
+def _build_search_query(senders: list[str], subjects: list[str], since_date: str) -> str:
     """Build IMAP search query for Informed Delivery."""
     # OR together multiple senders
     if len(senders) == 1:
         from_clause = f'FROM "{senders[0]}"'
     else:
-        # Build nested OR for multiple senders
         from_clause = f'FROM "{senders[0]}"'
         for sender in senders[1:]:
             from_clause = f'(OR {from_clause} FROM "{sender}")'
 
-    return f'({from_clause} SUBJECT "{subject}" SINCE {since_date})'
+    subject_clause = f'SUBJECT "{subjects[0]}"'
+    for subject in subjects[1:]:
+        subject_clause = f'(OR {subject_clause} SUBJECT "{subject}")'
+
+    return f'({from_clause} {subject_clause} SINCE {since_date})'
 
 
 # Minimum payload size — skip tracking pixels and tiny icons.
@@ -166,6 +175,63 @@ def _has_missing_mailpiece_placeholder(msg: Message) -> bool:
                 if NO_MAILPIECE_PATTERN.search(text):
                     return True
     return False
+
+
+def _get_message_html(msg: Message) -> str:
+    """Return the HTML body of an email when available."""
+    for part in msg.walk():
+        if part.get_content_type() != "text/html":
+            continue
+        raw = part.get_payload(decode=True)
+        if raw:
+            return raw.decode("utf-8", errors="ignore")
+    return ""
+
+
+def _html_to_text(html: str) -> str:
+    """Convert HTML to a whitespace-normalized plain-text string."""
+    text = html.replace("&nbsp;", " ")
+    text = re.sub(r"(?i)<br\s*/?>", " ", text)
+    text = re.sub(r"<[^>]+>", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _parse_delivery_counts(msg: Message) -> tuple[int | None, int | None]:
+    """
+    Parse mailpiece and inbound package counts from Informed Delivery email copy.
+
+    Example: "You have 2 mailpiece(s) and 1 inbound package(s) arriving soon."
+    """
+    html = _get_message_html(msg)
+    if not html:
+        return None, None
+
+    text = _html_to_text(html)
+
+    combined = re.search(
+        r"you have\s+(\d+)\s*mail\s*pieces?(?:\(\s*s\s*\))?"
+        r"(?:\s+and\s+(\d+)\s*(?:inbound\s+)?packages?(?:\(\s*s\s*\))?)?",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if combined:
+        mail_count = int(combined.group(1))
+        package_count = int(combined.group(2) or 0)
+        return mail_count, package_count
+
+    mail_match = re.search(r"(\d+)\s*mail\s*pieces?(?:\(\s*s\s*\))?", text, flags=re.IGNORECASE)
+    package_match = re.search(
+        r"(\d+)\s*(?:inbound\s+)?packages?(?:\(\s*s\s*\))?",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if mail_match or package_match:
+        return (
+            int(mail_match.group(1)) if mail_match else 0,
+            int(package_match.group(1)) if package_match else 0,
+        )
+
+    return None, None
 
 
 def _normalize_folder(folder: str | None) -> str:
@@ -352,7 +418,7 @@ async def check_informed_delivery(mail_config: dict[str, Any]) -> dict[str, Any]
 
     try:
         # Search for today's Informed Delivery email
-        search_query = _build_search_query(USPS_SENDERS, DIGEST_SUBJECT, _get_today_imap_date())
+        search_query = _build_search_query(USPS_SENDERS, INFORMED_DELIVERY_SUBJECTS, _get_today_imap_date())
         logger.debug(f"IMAP search in {selected_folder}: {search_query}")
 
         # Try UTF-8 charset first
@@ -367,7 +433,13 @@ async def check_informed_delivery(mail_config: dict[str, Any]) -> dict[str, Any]
 
         if not data or not data[0]:
             logger.info("No Informed Delivery email found for today")
-            return {"piece_count": 0, "gif_filename": None, "preview_images": []}
+            return {
+                "piece_count": 0,
+                "mailpiece_count": 0,
+                "package_count": 0,
+                "gif_filename": None,
+                "preview_images": [],
+            }
 
         # Get the latest matching email
         email_ids = data[0].split()
@@ -376,21 +448,43 @@ async def check_informed_delivery(mail_config: dict[str, Any]) -> dict[str, Any]
         status, msg_data = imap.fetch(latest_id, "(RFC822)")
         if status != "OK" or not msg_data[0]:
             logger.warning("Failed to fetch email")
-            return {"piece_count": 0, "gif_filename": None, "preview_images": []}
+            return {
+                "piece_count": 0,
+                "mailpiece_count": 0,
+                "package_count": 0,
+                "gif_filename": None,
+                "preview_images": [],
+            }
 
         raw_email = msg_data[0][1]
         msg = email.message_from_bytes(raw_email)
 
-        # Extract mail piece images
+        parsed_mail, parsed_packages = _parse_delivery_counts(msg)
+
+        # Extract mail piece images for previews (not used for counts when email copy is available).
         images = _extract_images_from_message(msg)
 
-        # Check for placeholder (mail expected but no image)
-        if _has_missing_mailpiece_placeholder(msg):
-            # Add a placeholder count
-            images.append(b"")  # Empty placeholder
+        if parsed_mail is not None:
+            mailpiece_count = parsed_mail
+            package_count = parsed_packages or 0
+            logger.info(
+                "Parsed delivery counts from email copy: %s mailpiece(s), %s package(s)",
+                mailpiece_count,
+                package_count,
+            )
+        else:
+            if _has_missing_mailpiece_placeholder(msg):
+                images.append(b"")
 
-        piece_count = len(images)
-        logger.info("Found %s mail pieces (%s with image data)", piece_count, sum(1 for img in images if img))
+            mailpiece_count = len(images)
+            package_count = 0
+            logger.info(
+                "Using image-based mail count: %s mailpiece(s) (%s with image data)",
+                mailpiece_count,
+                sum(1 for img in images if img),
+            )
+
+        piece_count = mailpiece_count + package_count
 
         preview_images, gif_filename = await _save_mail_previews(
             mail_config.get("id", "mail"),
@@ -400,6 +494,8 @@ async def check_informed_delivery(mail_config: dict[str, Any]) -> dict[str, Any]
 
         return {
             "piece_count": piece_count,
+            "mailpiece_count": mailpiece_count,
+            "package_count": package_count,
             "gif_filename": gif_filename,
             "preview_images": preview_images,
         }
