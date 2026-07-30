@@ -190,28 +190,25 @@ async def _probe_usps_browser(page, tracking_number: str) -> bool:
 
 
 async def _probe_ups_browser(page, tracking_number: str) -> bool:
+    from scrapers.navigation import (
+        dismiss_ups_overlays,
+        wait_for_ups_tracking,
+        warmup_ups_session,
+    )
+
     url = get_tracking_url("ups", tracking_number)
     logger.debug("Probing UPS link: %s", url)
 
     try:
+        await warmup_ups_session(page)
         await goto_tracking_page(page, url, timeout_ms=PROBE_TIMEOUT_MS)
-        try:
-            await page.wait_for_selector(
-                "[id^='shipProg_act_'], .ups-shipment-progress, .track-results",
-                timeout=8000,
-            )
-        except Exception:
+        await dismiss_ups_overlays(page)
+
+        if not await wait_for_ups_tracking(page, tracking_number, timeout_ms=20000):
             return False
 
-        if await page.locator("#shipProg_act_Date0").count() > 0:
-            logger.info("UPS link matched for %s", tracking_number)
-            return True
-
-        if await page.locator(".ups-shipment-progress").count() > 0:
-            logger.info("UPS link matched for %s", tracking_number)
-            return True
-
-        return False
+        logger.info("UPS link matched for %s", tracking_number)
+        return True
     except Exception as exc:
         logger.debug("UPS browser probe error for %s: %s", tracking_number, exc)
         return False

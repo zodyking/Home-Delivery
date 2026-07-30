@@ -194,36 +194,110 @@ async def wait_for_usps_tracking(page: Page, timeout_ms: int = 60000) -> bool:
     return await page.locator(".tb-status, #trackingNum").count() > 0
 
 
+async def dismiss_ups_overlays(page: Page) -> None:
+    """Close cookie, service-alert, and chat overlays that block UPS tracking UI."""
+    for selector in (
+        'button[aria-label="Close All Service Alerts"]',
+        'button:has-text("Dismiss All")',
+        'button:has-text("Dismiss Service Alert")',
+        "#onetrust-accept-btn-handler",
+        'button:has-text("Accept All Cookies")',
+        'button:has-text("Accept Cookies")',
+        'button:has-text("I Accept")',
+        'button[aria-label="Close chat window"]',
+        'button[aria-label="Minimize chat"]',
+    ):
+        loc = page.locator(selector)
+        try:
+            if await loc.count() == 0:
+                continue
+            await loc.first.click(timeout=1500, force=True)
+            await page.wait_for_timeout(400)
+        except Exception:
+            continue
+
+    try:
+        dialog_close = page.locator(
+            '[role="dialog"] button:has-text("Close"), '
+            '[aria-label*="cookie" i] button:has-text("Close")'
+        )
+        if await dialog_close.count() > 0:
+            await dialog_close.first.click(timeout=1500, force=True)
+            await page.wait_for_timeout(300)
+    except Exception:
+        pass
+
+
+async def warmup_ups_session(page: Page) -> None:
+    """
+    Visit ups.com first so track-details XHR looks same-site and Akamai/OneTrust
+    can mint cookies before the tracking deep-link.
+    """
+    try:
+        await page.goto(
+            "https://www.ups.com/",
+            wait_until="domcontentloaded",
+            timeout=45000,
+        )
+        await dismiss_ups_overlays(page)
+        await page.wait_for_timeout(1200)
+    except Exception as exc:
+        logger.warning("UPS warm-up visit failed (continuing): %s", exc)
+
+
+def _ups_tracking_ready_js() -> str:
+    return """() => {
+        if (document.getElementById("shipProg_act_Date0")) return true;
+        if (document.querySelector("ups-shipment-progress")) return true;
+        if (document.getElementById("stApp_copytrackingnumber")) return true;
+
+        const trackMeta = document.querySelector('meta[name="stapp-tracknum"]');
+        if (trackMeta) {
+            const val = (trackMeta.getAttribute("content") || "").trim().toLowerCase();
+            if (val && val !== "null") return true;
+        }
+
+        const buttons = Array.from(
+            document.querySelectorAll("button, a, [role='button']")
+        );
+        if (buttons.some((el) => {
+            const text = (el.innerText || el.textContent || "").replace(/\\s+/g, " ");
+            return /\\b(Show Details|Hide Details)\\b/i.test(text);
+        })) return true;
+
+        const root =
+            document.querySelector("app-track-details") ||
+            document.querySelector("main") ||
+            document.body;
+        const text = (root.innerText || "").replace(/\\s+/g, " ");
+        return /\\b(Delivered|Out for Delivery|On the Way|Label Created|We Have Your Package)\\b/i.test(text);
+    }"""
+
+
 async def wait_for_ups_tracking(
     page: Page,
     tracking_number: str,
-    timeout_ms: int = 45000,
+    timeout_ms: int = 60000,
 ) -> bool:
     """
     Wait until the UPS tracking results UI is actually ready.
 
-    Requires real result chrome (Show/Hide Details, shipment progress, or
-    stApp result nodes) — not merely the tracking number in HTML/source/nav.
+    Polls with overlay dismissal — the Angular app often stays on skeleton
+    loaders until cookies/consent are accepted and Track/GetStatus completes.
     """
     _ = tracking_number  # call-site compatibility; readiness is DOM-based
-    ready_js = """() => {
-        if (document.getElementById("shipProg_act_Date0")) return true;
-        if (document.querySelector("ups-shipment-progress")) return true;
-        if (document.getElementById("stApp_copytrackingnumber")) return true;
-        const buttons = Array.from(
-            document.querySelectorAll("button, a, [role='button']")
-        );
-        return buttons.some((el) => {
-            const text = (el.innerText || el.textContent || "").replace(/\\s+/g, " ");
-            return /\\b(Show Details|Hide Details)\\b/i.test(text);
-        });
-    }"""
+    deadline = time.monotonic() + (timeout_ms / 1000)
+    ready_js = _ups_tracking_ready_js()
 
-    try:
-        await page.wait_for_function(ready_js, timeout=timeout_ms)
-        return True
-    except Exception:
-        pass
+    while time.monotonic() < deadline:
+        try:
+            if await page.evaluate(ready_js):
+                return True
+        except Exception:
+            pass
+
+        await dismiss_ups_overlays(page)
+        await page.wait_for_timeout(750)
 
     selectors = (
         "#shipProg_act_Date0",
@@ -234,12 +308,15 @@ async def wait_for_ups_tracking(
     )
     for selector in selectors:
         try:
-            await page.wait_for_selector(selector, timeout=2500)
+            await page.wait_for_selector(selector, timeout=1500)
             return True
         except Exception:
             continue
 
-    return False
+    try:
+        return bool(await page.evaluate(ready_js))
+    except Exception:
+        return False
 
 
 async def wait_for_fedex_tracking(page: Page, timeout_ms: int = 25000) -> bool:

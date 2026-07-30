@@ -10,6 +10,8 @@ from typing import Any
 
 from playwright.async_api import Page
 
+from .navigation import dismiss_ups_overlays
+
 logger = logging.getLogger(__name__)
 
 # Parse every UPS Package History row after Show Details is open.
@@ -173,43 +175,9 @@ def build_tracking_result(
     return result
 
 
-async def _dismiss_ups_overlays(page: Page) -> None:
-    """Close cookie/chat/service-alert overlays that can block Show Details."""
-    for selector in (
-        'button[aria-label="Close All Service Alerts"]',
-        'button:has-text("Dismiss All")',
-        'button:has-text("Dismiss Service Alert")',
-        '#onetrust-accept-btn-handler',
-        'button:has-text("Accept All Cookies")',
-        'button:has-text("Accept Cookies")',
-        'button[aria-label="Close chat window"]',
-        'button[aria-label="Minimize chat"]',
-    ):
-        loc = page.locator(selector)
-        try:
-            if await loc.count() == 0:
-                continue
-            await loc.first.click(timeout=1500, force=True)
-            await page.wait_for_timeout(400)
-        except Exception:
-            continue
-
-    # OneTrust / cookie banner sometimes only exposes a generic Close.
-    try:
-        dialog_close = page.locator(
-            '[role="dialog"] button:has-text("Close"), '
-            '[aria-label*="cookie" i] button:has-text("Close")'
-        )
-        if await dialog_close.count() > 0:
-            await dialog_close.first.click(timeout=1500, force=True)
-            await page.wait_for_timeout(300)
-    except Exception:
-        pass
-
-
 async def expand_ups_details(page: Page) -> None:
     """Open UPS Package History (Show Details)."""
-    await _dismiss_ups_overlays(page)
+    await dismiss_ups_overlays(page)
 
     if await page.locator("#shipProg_act_Date0").count() > 0:
         return

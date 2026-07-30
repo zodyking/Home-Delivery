@@ -21,10 +21,12 @@ from carrier_detect import (
 from .base import get_page, reset_browser_on_failure
 from .navigation import (
     HTTP2_ERROR_MARKERS,
+    dismiss_ups_overlays,
     goto_tracking_page,
     wait_for_estes_tracking,
     wait_for_ups_tracking,
     wait_for_usps_tracking,
+    warmup_ups_session,
 )
 from .parsers import parse_estes_tracking, parse_ups_tracking, parse_usps_tracking
 
@@ -68,10 +70,13 @@ async def _fetch_usps(page, tracking_number: str) -> dict[str, Any]:
 
 async def _fetch_ups(page, tracking_number: str) -> dict[str, Any]:
     """Fetch UPS tracking data from a ready page."""
+    await warmup_ups_session(page)
+
     url = get_tracking_url("ups", tracking_number)
     await goto_tracking_page(page, url, timeout_ms=60000)
+    await dismiss_ups_overlays(page)
 
-    if not await wait_for_ups_tracking(page, tracking_number, timeout_ms=45000):
+    if not await wait_for_ups_tracking(page, tracking_number, timeout_ms=60000):
         return {"error": "UPS tracking content not found"}
 
     return await parse_ups_tracking(page)
@@ -184,16 +189,26 @@ async def fetch_carrier_tracking(
 
     # USPS (and occasionally UPS) can stick on a cold Akamai/browser state —
     # one full browser reset often clears it in Home Assistant containers.
-    if carrier == "usps" and _needs_browser_retry(result) and not (result.get("events") or []):
+    if (
+        carrier in ("usps", "ups")
+        and _needs_browser_retry(result)
+        and not (result.get("events") or [])
+    ):
         logger.warning(
-            "USPS fetch blocked (%s); resetting browser and retrying once",
+            "%s fetch blocked (%s); resetting browser and retrying once",
+            carrier.upper(),
             result.get("error"),
         )
         await reset_browser_on_failure()
         try:
             result = await _do_fetch()
         except Exception as retry_exc:
-            logger.error("USPS browser-reset retry failed for %s: %s", normalized, retry_exc)
+            logger.error(
+                "%s browser-reset retry failed for %s: %s",
+                carrier.upper(),
+                normalized,
+                retry_exc,
+            )
             return {"error": str(retry_exc)}
 
     events = result.get("events") or []

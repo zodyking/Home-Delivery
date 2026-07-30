@@ -829,8 +829,13 @@ async def test_tts(request: TTSTestRequest):
 
         raw_message = request.message or "This is a Home Delivery test announcement."
 
-        # Per message-type test: honor skip/volume overrides + prefix
+        # Per message-type test: use live dashboard data when available.
         if request.type_id:
+            from tts_triggers import build_announcement_test_message
+
+            live_message = await build_announcement_test_message(request.type_id)
+            if live_message:
+                raw_message = live_message
             sent = await dispatch_tts(config, raw_message, request.type_id)
             if sent == 0:
                 raise HTTPException(

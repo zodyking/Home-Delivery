@@ -195,16 +195,86 @@ def build_mail_tts_message(accounts: list[dict[str, Any]]) -> str:
     return f"{'. '.join(lines)}."
 
 
-async def trigger_mail_tts(accounts: list[dict[str, Any]]) -> None:
-    """Trigger TTS announcement with mail and package counts per address."""
+async def trigger_daily_digest_tts(accounts: list[dict[str, Any]] | None = None) -> None:
+    """Trigger repeating Daily Digest TTS with current mail/package counts."""
     if not await _should_announce("mail_arrived"):
-        logger.debug("TTS skipped for mail_arrived")
+        logger.debug("TTS skipped for daily digest")
         return
 
+    if accounts is None:
+        config = await config_store.load()
+        accounts = [
+            a for a in config.get("mail", {}).get("accounts", [])
+            if a.get("enabled", True)
+        ]
+
     message = build_mail_tts_message(accounts)
-    logger.info(f"Sending mail TTS: {message}")
+    logger.info("Sending daily digest TTS: %s", message)
     config = await config_store.load()
     await dispatch_tts(config, message, "mail_arrived")
+
+    tts = dict(config.get("tts") or {})
+    tts["last_daily_digest_at"] = datetime.now().isoformat()
+    await config_store.update({"tts": tts})
+
+
+async def trigger_mail_tts(accounts: list[dict[str, Any]]) -> None:
+    """Deprecated alias — use trigger_daily_digest_tts for scheduled digests."""
+    await trigger_daily_digest_tts(accounts)
+
+
+def _pick_package_for_test(
+    packages: list[dict[str, Any]],
+    event_type: str,
+) -> dict[str, Any] | None:
+    if not packages:
+        return None
+
+    if event_type == "delivered":
+        delivered = [p for p in packages if p.get("delivered")]
+        if delivered:
+            return delivered[0]
+
+    if event_type == "out_for_delivery":
+        ofd = [p for p in packages if p.get("out_for_delivery") and not p.get("delivered")]
+        if ofd:
+            return ofd[0]
+
+    active = [p for p in packages if not p.get("delivered")]
+    if active:
+        return active[0]
+    return packages[0]
+
+
+async def build_announcement_test_message(type_id: str) -> str:
+    """Build a test announcement from live dashboard data when available."""
+    config = await config_store.load()
+    packages = await config_store.get_packages()
+    mail_state = await config_store.get_mail_state()
+    accounts = [
+        a for a in (mail_state.get("accounts") or config.get("mail", {}).get("accounts", []))
+        if a.get("enabled", True)
+    ]
+
+    if type_id == "mail_arrived":
+        if accounts:
+            return build_mail_tts_message(accounts)
+        return "no mail accounts are configured."
+
+    package = _pick_package_for_test(packages, type_id)
+    if package:
+        if type_id == "delivered":
+            return _build_package_message(package, newly_delivered=True)
+        if type_id == "out_for_delivery":
+            return _build_package_message(package, newly_ofd=True)
+        return _build_package_message(package, status_changed=True)
+
+    fallbacks = {
+        "status_change": "no active packages to announce.",
+        "out_for_delivery": "no packages are out for delivery right now.",
+        "delivered": "no delivered packages to announce.",
+    }
+    return fallbacks.get(type_id, "no announcement data is available yet.")
 
 
 async def trigger_package_tts(

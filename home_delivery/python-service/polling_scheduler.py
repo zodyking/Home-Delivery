@@ -15,13 +15,15 @@ from typing import Any
 
 from config_store import config_store
 from scrapers import scrape_package
-from tts_triggers import trigger_package_tts, trigger_mail_tts
+from tts_triggers import trigger_package_tts, trigger_daily_digest_tts
+from tts_schedule import should_fire_daily_digest
 
 logger = logging.getLogger(__name__)
 
 # Global scheduler task reference
 _scheduler_task: asyncio.Task | None = None
 _mail_scheduler_task: asyncio.Task | None = None
+_digest_scheduler_task: asyncio.Task | None = None
 
 # USPS-only cadence (seconds) — avoid hourly Akamai hits on idle labels.
 USPS_LABEL_CREATED_INTERVAL = 12 * 3600  # 12 hours
@@ -237,15 +239,6 @@ async def _poll_mail() -> None:
     try:
         from mail.informed_delivery import check_informed_delivery
 
-        old_by_id = {
-            a["id"]: {
-                "mailpiece_count": int(a.get("mailpiece_count") or 0),
-                "package_count": int(a.get("package_count") or 0),
-            }
-            for a in enabled
-            if a.get("id")
-        }
-
         for account in enabled:
             if not all([account.get("imap_host"), account.get("imap_user"), account.get("imap_password")]):
                 continue
@@ -303,22 +296,37 @@ async def _poll_mail() -> None:
                     last_error=str(e),
                 )
 
-        config = await config_store.load()
-        updated_accounts = [
-            a for a in config.get("mail", {}).get("accounts", [])
-            if a.get("enabled", True)
-        ]
-        mail_changed = any(
-            int(a.get("mailpiece_count") or 0) != old_by_id.get(a.get("id"), {}).get("mailpiece_count", -1)
-            or int(a.get("package_count") or 0) != old_by_id.get(a.get("id"), {}).get("package_count", -1)
-            for a in updated_accounts
-            if a.get("id")
-        )
-        if mail_changed:
-            await trigger_mail_tts(updated_accounts)
+        # Daily Digest is scheduled separately — mail sync only updates dashboard state.
 
     except Exception as e:
         logger.error(f"Mail check failed: {e}")
+
+
+async def _daily_digest_loop() -> None:
+    """Fire repeating Daily Digest announcements on configured interval."""
+    logger.info("Daily Digest scheduler started")
+    await asyncio.sleep(45)
+
+    while True:
+        try:
+            config = await config_store.load()
+            tts = config.get("tts") or {}
+            last_raw = tts.get("last_daily_digest_at")
+            last_fired = None
+            if last_raw:
+                try:
+                    last_fired = datetime.fromisoformat(str(last_raw).replace("Z", "+00:00"))
+                except Exception:
+                    last_fired = None
+
+            now = datetime.now()
+            if should_fire_daily_digest(now, tts, last_fired=last_fired):
+                logger.info("Daily Digest slot matched at %s", now.strftime("%H:%M"))
+                await trigger_daily_digest_tts()
+        except Exception as exc:
+            logger.error("Daily Digest scheduler error: %s", exc)
+
+        await asyncio.sleep(60)
 
 
 async def _scheduler_loop() -> None:
@@ -367,7 +375,7 @@ async def _mail_scheduler_loop() -> None:
 
 def start_scheduler() -> None:
     """Start the background polling scheduler."""
-    global _scheduler_task, _mail_scheduler_task
+    global _scheduler_task, _mail_scheduler_task, _digest_scheduler_task
 
     loop = asyncio.get_event_loop()
 
@@ -377,10 +385,13 @@ def start_scheduler() -> None:
     if _mail_scheduler_task is None or _mail_scheduler_task.done():
         _mail_scheduler_task = loop.create_task(_mail_scheduler_loop())
 
+    if _digest_scheduler_task is None or _digest_scheduler_task.done():
+        _digest_scheduler_task = loop.create_task(_daily_digest_loop())
+
 
 def stop_scheduler() -> None:
     """Stop the background polling scheduler."""
-    global _scheduler_task, _mail_scheduler_task
+    global _scheduler_task, _mail_scheduler_task, _digest_scheduler_task
 
     if _scheduler_task and not _scheduler_task.done():
         _scheduler_task.cancel()
@@ -389,3 +400,7 @@ def stop_scheduler() -> None:
     if _mail_scheduler_task and not _mail_scheduler_task.done():
         _mail_scheduler_task.cancel()
         _mail_scheduler_task = None
+
+    if _digest_scheduler_task and not _digest_scheduler_task.done():
+        _digest_scheduler_task.cancel()
+        _digest_scheduler_task = None

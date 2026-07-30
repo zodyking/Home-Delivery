@@ -665,6 +665,19 @@ class HomeDeliveryPanel extends HTMLElement {
     if (ttsStartTime) this._settings.tts.start_time = ttsStartTime.value;
     if (ttsEndTime) this._settings.tts.end_time = ttsEndTime.value;
 
+    const digestHours = s.querySelector("#daily-digest-repeat-hours");
+    const digestMinutes = s.querySelector("#daily-digest-repeat-minutes");
+    const digestOffset = s.querySelector("#daily-digest-minute-offset");
+    if (digestHours) {
+      this._settings.tts.daily_digest_repeat_hours = Math.max(0, Math.min(12, parseInt(digestHours.value, 10) || 0));
+    }
+    if (digestMinutes) {
+      this._settings.tts.daily_digest_repeat_minutes = Math.max(0, Math.min(59, parseInt(digestMinutes.value, 10) || 0));
+    }
+    if (digestOffset) {
+      this._settings.tts.daily_digest_minute_offset = Math.max(0, Math.min(59, parseInt(digestOffset.value, 10) || 0));
+    }
+
     const messagePrefix = s.querySelector("#message-prefix");
     if (messagePrefix) {
       this._settings.message_prefix = messagePrefix.value || "Message from Home Delivery";
@@ -743,24 +756,28 @@ class HomeDeliveryPanel extends HTMLElement {
     const catalog = {
       usps: {
         label: "USPS",
+        shipperName: "United States Postal Service",
         service: "Ground Advantage",
         subtitle: "Package Tracking",
         logoLocal: "usps.svg",
       },
       ups: {
         label: "UPS",
+        shipperName: "United Parcel Service",
         service: "Ground",
         subtitle: "Package Tracking",
         logoLocal: "ups.svg",
       },
       fedex: {
         label: "FedEx",
+        shipperName: "FedEx",
         service: "Ground",
         subtitle: "Package Tracking",
         logoLocal: "fedex.svg",
       },
       estes: {
         label: "Estes",
+        shipperName: "Estes Express Lines",
         service: "LTL Freight",
         subtitle: "Shipment Tracking",
         logoLocal: "estes.svg",
@@ -768,6 +785,7 @@ class HomeDeliveryPanel extends HTMLElement {
     };
     return catalog[key] || {
       label: (carrier || "?").toString().toUpperCase(),
+      shipperName: (carrier || "Carrier").toString(),
       service: "Tracking",
       subtitle: "Package Tracking",
       logoLocal: null,
@@ -1822,11 +1840,8 @@ class HomeDeliveryPanel extends HTMLElement {
       <article class="package-card ${statusClass} carrier-${carrierKey}${needsDetails ? " needs-details" : ""}${pkg.delivered ? " is-delivered" : ""}" data-package-id="${pkg.id}">
         <section class="pkg-label">
           <header class="label-header">
-            <div class="carrier-logo">
-              ${this._carrierLogoHtml(pkg.carrier)}
-            </div>
-            <div class="service-block">
-              <strong>${this._esc(meta.service)}</strong>
+            <div class="service-block service-block--full">
+              <strong>${this._esc(meta.shipperName || meta.service)}</strong>
               <span>${this._esc(meta.subtitle)}</span>
             </div>
           </header>
@@ -2192,7 +2207,7 @@ class HomeDeliveryPanel extends HTMLElement {
     `;
   }
 
-  _renderMessageTypeSection(typeId, title, subtitle, toggleId, enabled, testMessage) {
+  _renderMessageTypeSection(typeId, title, subtitle, toggleId, enabled) {
     return this._renderCollapsibleSection(typeId.replace(/_/g, "-"), title, subtitle, `
       <div class="subsection-title">Per-speaker playback</div>
       <div class="per-speaker-header">
@@ -2202,9 +2217,53 @@ class HomeDeliveryPanel extends HTMLElement {
       </div>
       ${this._renderPerSpeakerSection(typeId, 0.6)}
       <div class="form-actions-row">
-        <button type="button" class="test-tts-btn" data-test-type="${typeId}" data-test-message="${this._escapeAttr(testMessage)}">Test announcement</button>
+        <button type="button" class="test-tts-btn" data-test-type="${typeId}">Test announcement</button>
       </div>
     `, { hasToggle: true, toggleId, toggleChecked: enabled });
+  }
+
+  _renderDailyDigestSection(tts) {
+    const repeatHours = tts.daily_digest_repeat_hours ?? 1;
+    const repeatMinutes = tts.daily_digest_repeat_minutes ?? 30;
+    const minuteOffset = tts.daily_digest_minute_offset ?? 0;
+
+    return this._renderCollapsibleSection(
+      "daily-digest",
+      "Daily Digest",
+      "Repeating mail and package summary during active hours",
+      `
+        <div class="form-row daily-digest-repeat-row">
+          <div class="form-group">
+            <label for="daily-digest-repeat-hours">Repeat every (hours)</label>
+            <input type="number" id="daily-digest-repeat-hours" min="0" max="12" step="1" value="${repeatHours}" />
+          </div>
+          <div class="form-group">
+            <label for="daily-digest-repeat-minutes">Repeat every (minutes)</label>
+            <input type="number" id="daily-digest-repeat-minutes" min="0" max="59" step="5" value="${repeatMinutes}" />
+          </div>
+          <div class="form-group">
+            <label for="daily-digest-minute-offset">Minute offset</label>
+            <input type="number" id="daily-digest-minute-offset" min="0" max="59" step="1" value="${minuteOffset}" />
+          </div>
+        </div>
+        <p class="hint">Uses the active hours above. Example: 9:00–21:00, offset 45, every 1h 30m → 9:45, 11:15, 12:45…</p>
+        <div class="subsection-title">Per-speaker playback</div>
+        <div class="per-speaker-header">
+          <span>Speaker</span>
+          <span>Volume</span>
+          <span>Skip</span>
+        </div>
+        ${this._renderPerSpeakerSection("mail_arrived", 0.6)}
+        <div class="form-actions-row">
+          <button type="button" class="test-tts-btn" data-test-type="mail_arrived">Test announcement</button>
+        </div>
+      `,
+      {
+        hasToggle: true,
+        toggleId: "tts-mail-arrived",
+        toggleChecked: tts.enable_mail_arrived !== false,
+      },
+    );
   }
 
   _renderAnnouncementsPane(activePane) {
@@ -2274,7 +2333,6 @@ class HomeDeliveryPanel extends HTMLElement {
           "Speak when package status updates",
           "tts-status-change",
           tts.enable_status_change !== false,
-          "the UPS package for Mom is now in transit.",
         )}
         ${this._renderMessageTypeSection(
           "out_for_delivery",
@@ -2282,7 +2340,6 @@ class HomeDeliveryPanel extends HTMLElement {
           "Speak when a package is out for delivery",
           "tts-out-for-delivery",
           tts.enable_out_for_delivery !== false,
-          "the UPS package for Mom is out for delivery.",
         )}
         ${this._renderMessageTypeSection(
           "delivered",
@@ -2290,16 +2347,8 @@ class HomeDeliveryPanel extends HTMLElement {
           "Speak when a package is delivered",
           "tts-delivered",
           tts.enable_delivered !== false,
-          "the UPS package for Mom has been delivered.",
         )}
-        ${this._renderMessageTypeSection(
-          "mail_arrived",
-          "Mail Arrived",
-          "Speak when Informed Delivery mail arrives",
-          "tts-mail-arrived",
-          tts.enable_mail_arrived !== false,
-          "for Home, 3 pieces of mail and one package expected today. for Office, no mail and no packages expected today.",
-        )}
+        ${this._renderDailyDigestSection(tts)}
       </section>
     `;
   }
@@ -3141,7 +3190,6 @@ class HomeDeliveryPanel extends HTMLElement {
           await this._fetchApi("/api/test-tts", {
             method: "POST",
             body: JSON.stringify({
-              message: btn.dataset.testMessage || "the UPS package for Mom is out for delivery.",
               type_id: btn.dataset.testType,
             }),
           });
@@ -3986,6 +4034,9 @@ class HomeDeliveryPanel extends HTMLElement {
         align-items: stretch;
         gap: var(--space-2);
         min-width: 0;
+        margin-left: calc(-1 * var(--space-3));
+        margin-right: calc(-1 * var(--space-3));
+        width: calc(100% + (2 * var(--space-3)));
       }
 
       .mail-hero-preview {
@@ -3997,12 +4048,14 @@ class HomeDeliveryPanel extends HTMLElement {
       .mail-hero-preview .mail-carousel,
       .mail-hero-preview .mail-preview {
         width: 100%;
+        border-radius: 0;
       }
 
       .mail-hero-counts {
         display: grid;
         grid-template-columns: repeat(2, minmax(0, 1fr));
         gap: var(--space-2);
+        padding: 0 var(--space-3);
       }
 
       .mail-count-block {
@@ -4059,14 +4112,14 @@ class HomeDeliveryPanel extends HTMLElement {
 
       .mail-preview img {
         width: 100%;
-        height: clamp(112px, 22vw, 168px);
-        max-height: clamp(112px, 22vw, 168px);
+        height: clamp(200px, 38vw, 300px);
+        max-height: clamp(200px, 38vw, 300px);
         object-fit: cover;
         object-position: center;
-        border-radius: var(--radius-md);
-        border: 1px solid var(--hd-border);
-        box-shadow: var(--shadow-md);
-        background: #fff;
+        border-radius: 0;
+        border: none;
+        box-shadow: none;
+        background: transparent;
       }
 
       .mail-preview--placeholder {
@@ -4074,10 +4127,10 @@ class HomeDeliveryPanel extends HTMLElement {
         align-items: center;
         justify-content: center;
         width: 100%;
-        height: clamp(112px, 22vw, 168px);
-        max-height: clamp(112px, 22vw, 168px);
-        border-radius: var(--radius-md);
-        border: 1px dashed var(--hd-border-strong);
+        height: clamp(200px, 38vw, 300px);
+        max-height: clamp(200px, 38vw, 300px);
+        border-radius: 0;
+        border: none;
         background: var(--hd-elevated);
         color: var(--hd-muted);
         opacity: 0.45;
@@ -4114,13 +4167,13 @@ class HomeDeliveryPanel extends HTMLElement {
         width: 100%;
         min-width: 0;
         max-width: 100%;
-        height: clamp(112px, 22vw, 168px);
-        max-height: clamp(112px, 22vw, 168px);
-        border-radius: var(--radius-md);
+        height: clamp(200px, 38vw, 300px);
+        max-height: clamp(200px, 38vw, 300px);
+        border-radius: 0;
         overflow: hidden;
-        border: 1px solid var(--hd-border);
-        background: #fff;
-        box-shadow: var(--shadow-md);
+        border: none;
+        background: transparent;
+        box-shadow: none;
       }
 
       .mail-carousel-viewport {
@@ -4146,9 +4199,9 @@ class HomeDeliveryPanel extends HTMLElement {
       .mail-carousel-slide img {
         width: 100%;
         height: 100%;
-        object-fit: contain;
+        object-fit: cover;
         object-position: center;
-        background: #fff;
+        background: transparent;
       }
 
       .mail-carousel-badge {
@@ -4305,10 +4358,13 @@ class HomeDeliveryPanel extends HTMLElement {
       }
 
       .mail-other-card .mail-preview img {
-        height: clamp(112px, 22vw, 168px);
-        max-height: clamp(112px, 22vw, 168px);
+        height: clamp(200px, 38vw, 300px);
+        max-height: clamp(200px, 38vw, 300px);
         object-fit: cover;
-        background: #fff;
+        background: transparent;
+        border: none;
+        box-shadow: none;
+        border-radius: 0;
       }
 
       .mail-other-error {
@@ -4531,171 +4587,103 @@ class HomeDeliveryPanel extends HTMLElement {
         gap: var(--space-4);
       }
 
-      /* Mailing-label package cards */
+      /* Package cards — dark theme, full-width header */
       .package-card {
-        --label-ink: #111;
-        --label-muted: #555;
-        --label-paper: #f7f7f2;
-        --label-panel: rgba(255, 255, 255, 0.94);
-        --usps-blue: #004b87;
-        --usps-red: #da291c;
+        --label-ink: var(--hd-text);
+        --label-muted: var(--hd-muted);
         position: relative;
         overflow: hidden;
-        color: var(--label-ink);
-        background: var(--label-paper);
-        border: 1px solid rgba(255, 255, 255, 0.22);
-        border-radius: 10px;
+        color: var(--hd-text);
+        background: var(--hd-surface-2);
+        border: 1px solid var(--hd-border);
+        border-radius: var(--radius-md);
         padding: 0;
-        box-shadow:
-          0 18px 40px rgba(0, 0, 0, 0.35),
-          inset 0 1px rgba(255, 255, 255, 0.9);
+        box-shadow: var(--shadow-md);
         transition: transform var(--dur-fast) var(--ease), box-shadow var(--dur-fast) var(--ease);
       }
 
       .package-card::before {
-        content: "";
-        position: absolute;
-        inset: 0;
-        pointer-events: none;
-        opacity: 0.2;
-        background-image: repeating-linear-gradient(
-          0deg,
-          transparent 0,
-          transparent 4px,
-          rgba(0, 0, 0, 0.025) 5px
-        );
-        mix-blend-mode: multiply;
+        display: none;
       }
 
       .package-card:hover {
         transform: translateY(-2px);
-        box-shadow:
-          0 22px 48px rgba(0, 0, 0, 0.42),
-          inset 0 1px rgba(255, 255, 255, 0.9);
+        box-shadow: var(--shadow-lg);
       }
 
       .package-card.out-for-delivery {
-        box-shadow:
-          0 18px 40px rgba(0, 0, 0, 0.35),
-          0 0 0 2px color-mix(in srgb, #c98500 70%, transparent);
+        box-shadow: var(--shadow-md), 0 0 0 1px color-mix(in srgb, #c98500 55%, transparent);
       }
 
       .package-card.delivered,
       .package-card.is-delivered {
-        opacity: 0.94;
-        box-shadow:
-          0 18px 40px rgba(0, 0, 0, 0.3),
-          0 0 0 2px color-mix(in srgb, #2f8f57 65%, transparent);
+        opacity: 0.92;
+        box-shadow: var(--shadow-md), 0 0 0 1px color-mix(in srgb, #2f8f57 50%, transparent);
       }
 
       .package-card.error {
-        box-shadow:
-          0 18px 40px rgba(0, 0, 0, 0.35),
-          0 0 0 2px color-mix(in srgb, #9e2b2b 70%, transparent);
+        box-shadow: var(--shadow-md), 0 0 0 1px color-mix(in srgb, #9e2b2b 55%, transparent);
       }
 
       .package-card.needs-details {
-        box-shadow:
-          0 18px 40px rgba(0, 0, 0, 0.35),
-          0 0 0 2px color-mix(in srgb, #3f9a5f 70%, transparent);
+        box-shadow: var(--shadow-md), 0 0 0 1px color-mix(in srgb, #3f9a5f 55%, transparent);
       }
 
       .pkg-label {
         position: relative;
         z-index: 1;
-        margin: 12px;
+        margin: 0;
         overflow: hidden;
-        border: 2px solid var(--label-ink);
-        background: var(--label-panel);
-        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+        border: none;
+        background: transparent;
+        box-shadow: none;
       }
 
       .label-header {
-        display: grid;
-        grid-template-columns: 108px 1fr;
-        min-height: 70px;
-        border-bottom: 2px solid var(--label-ink);
-      }
-
-      .carrier-logo {
-        display: grid;
-        place-items: center;
-        padding: 10px 8px;
-        border-right: 2px solid var(--label-ink);
-        background: #fff;
-        min-width: 0;
-      }
-
-      .carrier-logo-img {
         display: block;
-        width: auto;
-        height: auto;
-        max-width: 88px;
-        max-height: 44px;
-        object-fit: contain;
+        border-bottom: 1px solid var(--hd-border);
       }
 
-      .carrier-logo-img.carrier-logo-ups {
-        max-width: 36px;
-        max-height: 44px;
-      }
-
-      .carrier-logo-img.carrier-logo-fedex {
-        max-width: 72px;
-        max-height: 36px;
-      }
-
-      .carrier-logo-img.carrier-logo-estes {
-        max-width: 80px;
-        max-height: 40px;
-      }
-
-      .carrier-logo-text {
-        color: var(--label-ink);
-        font-family: Arial Black, Arial, sans-serif;
-        font-size: 16px;
-        font-weight: 900;
-        letter-spacing: -0.5px;
-        text-align: center;
-      }
-
-      .service-block {
+      .service-block--full {
         display: flex;
         flex-direction: column;
         justify-content: center;
-        padding: 10px 12px;
+        padding: var(--space-3) var(--space-4);
         min-width: 0;
+        width: 100%;
       }
 
       .service-block strong {
-        font-size: 14px;
-        line-height: 1.15;
-        text-transform: uppercase;
+        font-size: clamp(15px, 2.4vw, 18px);
+        line-height: 1.2;
+        font-weight: 700;
         letter-spacing: -0.01em;
+        text-transform: none;
+        color: var(--hd-text);
       }
 
       .service-block span {
-        margin-top: 5px;
-        color: var(--label-muted);
-        font-size: 9px;
-        font-weight: 800;
-        letter-spacing: 0.12em;
+        margin-top: 4px;
+        color: var(--hd-muted);
+        font-size: 10px;
+        font-weight: 600;
+        letter-spacing: 0.1em;
         text-transform: uppercase;
       }
 
       .label-meta {
-        border-bottom: 2px solid var(--label-ink);
+        border-bottom: 1px solid var(--hd-border);
       }
 
       .tracking-summary {
-        padding: 10px 12px;
+        padding: var(--space-3) var(--space-4);
         min-width: 0;
       }
 
       .small-label {
-        color: var(--label-muted);
+        color: var(--hd-muted);
         font-size: 8px;
-        font-weight: 900;
+        font-weight: 700;
         letter-spacing: 0.13em;
         text-transform: uppercase;
       }
@@ -4704,16 +4692,17 @@ class HomeDeliveryPanel extends HTMLElement {
         margin-top: 4px;
         font-family: "Courier New", ui-monospace, monospace;
         font-size: 12px;
-        font-weight: 900;
+        font-weight: 700;
         letter-spacing: 0.02em;
         word-break: break-all;
+        color: var(--hd-text);
       }
 
       .address-section {
         display: grid;
         grid-template-columns: 48px 1fr;
         min-height: 118px;
-        border-bottom: 2px solid var(--label-ink);
+        border-bottom: 1px solid var(--hd-border);
       }
 
       .ship-to {
@@ -4721,9 +4710,10 @@ class HomeDeliveryPanel extends HTMLElement {
         align-items: flex-start;
         justify-content: center;
         padding-top: 14px;
-        border-right: 2px solid var(--label-ink);
+        border-right: 1px solid var(--hd-border);
+        color: var(--hd-muted);
         font-size: 10px;
-        font-weight: 900;
+        font-weight: 700;
         letter-spacing: 0.1em;
         text-transform: uppercase;
         writing-mode: vertical-rl;
@@ -4731,24 +4721,25 @@ class HomeDeliveryPanel extends HTMLElement {
       }
 
       .recipient {
-        padding: 14px 14px 12px;
+        padding: 14px var(--space-4) 12px;
         min-width: 0;
       }
 
       .recipient-name {
         margin: 0;
-        font-size: 23px;
-        font-weight: 900;
-        letter-spacing: -0.04em;
+        font-size: clamp(20px, 4vw, 24px);
+        font-weight: 800;
+        letter-spacing: -0.03em;
         text-transform: uppercase;
         line-height: 1.05;
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
+        color: var(--hd-text);
       }
 
       .recipient-name.is-empty {
-        color: #2f8f57;
+        color: #5dbe7a;
         font-style: italic;
         text-transform: none;
       }
@@ -4757,10 +4748,11 @@ class HomeDeliveryPanel extends HTMLElement {
         margin: 8px 0 0;
         font-family: "Courier New", ui-monospace, monospace;
         font-size: 13px;
-        font-weight: 800;
+        font-weight: 700;
         line-height: 1.4;
         text-transform: uppercase;
         word-break: break-word;
+        color: color-mix(in srgb, var(--hd-text) 88%, var(--hd-muted));
       }
 
       .delivery-status {
@@ -4769,9 +4761,10 @@ class HomeDeliveryPanel extends HTMLElement {
         gap: 8px;
         margin-top: 10px;
         font-size: 10px;
-        font-weight: 900;
+        font-weight: 700;
         letter-spacing: 0.08em;
         text-transform: uppercase;
+        color: var(--hd-text);
       }
 
       .status-dot {
@@ -4802,20 +4795,15 @@ class HomeDeliveryPanel extends HTMLElement {
         display: grid;
         grid-template-columns: 92px 1fr;
         min-height: 84px;
-        border-bottom: 2px solid var(--label-ink);
+        border-bottom: 1px solid var(--hd-border);
       }
 
       .event-code {
         display: grid;
         place-items: center;
         padding: 10px;
-        border-right: 2px solid var(--label-ink);
-        background:
-          repeating-linear-gradient(
-            -45deg,
-            transparent 0 7px,
-            rgba(0, 0, 0, 0.035) 7px 8px
-          );
+        border-right: 1px solid var(--hd-border);
+        background: rgba(255, 255, 255, 0.03);
         text-align: center;
       }
 
@@ -4823,44 +4811,46 @@ class HomeDeliveryPanel extends HTMLElement {
         display: block;
         font-size: 22px;
         line-height: 1;
+        color: var(--hd-text);
       }
 
       .event-code span {
         display: block;
         margin-top: 5px;
-        color: var(--label-muted);
+        color: var(--hd-muted);
         font-size: 8px;
-        font-weight: 900;
+        font-weight: 700;
         letter-spacing: 0.08em;
         text-transform: uppercase;
       }
 
       .event-details {
-        padding: 11px 12px;
+        padding: 11px var(--space-4);
         min-width: 0;
       }
 
       .event-title {
         margin: 0;
         font-size: 14px;
-        font-weight: 900;
+        font-weight: 700;
         text-transform: uppercase;
         line-height: 1.2;
+        color: var(--hd-text);
       }
 
       .event-meta {
         margin-top: 6px;
-        color: #444;
+        color: var(--hd-muted);
         font-family: "Courier New", ui-monospace, monospace;
         font-size: 11px;
-        font-weight: 700;
+        font-weight: 600;
         line-height: 1.45;
         word-break: break-word;
       }
 
       .event-location {
-        color: var(--label-ink);
-        font-weight: 900;
+        color: var(--hd-text);
+        font-weight: 700;
         text-transform: uppercase;
       }
 
@@ -4868,19 +4858,20 @@ class HomeDeliveryPanel extends HTMLElement {
         display: grid;
         grid-template-columns: 1fr 1fr 44px;
         gap: 7px;
-        padding: 10px;
-        background: #eee;
+        padding: var(--space-3) var(--space-4);
+        background: transparent;
+        border-top: none;
       }
 
       .action-button {
         min-height: 40px;
         padding: 0 10px;
-        border: 1px solid #222;
-        border-radius: 3px;
-        background: #fff;
-        color: #111;
+        border: 1px solid var(--hd-border-strong);
+        border-radius: var(--radius-sm);
+        background: transparent;
+        color: var(--hd-text);
         font-size: 11px;
-        font-weight: 900;
+        font-weight: 700;
         letter-spacing: 0.04em;
         text-transform: uppercase;
         cursor: pointer;
@@ -4889,7 +4880,7 @@ class HomeDeliveryPanel extends HTMLElement {
 
       .action-button:hover:not(:disabled) {
         transform: translateY(-1px);
-        background: #f4f4f4;
+        background: rgba(255, 255, 255, 0.06);
       }
 
       .action-button:disabled {
@@ -4898,34 +4889,37 @@ class HomeDeliveryPanel extends HTMLElement {
       }
 
       .action-button.primary {
-        background: #111;
+        background: var(--hd-accent);
+        border-color: var(--hd-accent);
         color: #fff;
       }
 
       .action-button.primary:hover:not(:disabled) {
-        background: #222;
+        background: var(--hd-accent-hover);
+        border-color: var(--hd-accent-hover);
       }
 
       .action-button.remove {
         padding: 0;
-        border-color: #9e2b2b;
-        color: #9e2b2b;
+        border-color: color-mix(in srgb, var(--hd-danger) 70%, transparent);
+        color: var(--hd-danger);
         font-size: 20px;
         line-height: 1;
+        background: transparent;
       }
 
       .action-button.remove:hover:not(:disabled) {
-        background: #9e2b2b;
-        color: #fff;
+        background: color-mix(in srgb, var(--hd-danger) 18%, transparent);
+        color: var(--hd-danger);
       }
 
       .package-card .discover-badge {
         margin-top: 10px;
         margin-left: 0;
         width: fit-content;
-        color: #2f8f57;
-        background: color-mix(in srgb, #5dbe7a 16%, #fff);
-        border-color: color-mix(in srgb, #5dbe7a 65%, transparent);
+        color: #5dbe7a;
+        background: color-mix(in srgb, #5dbe7a 14%, transparent);
+        border-color: color-mix(in srgb, #5dbe7a 45%, transparent);
       }
 
       .discover-badge {
@@ -5534,6 +5528,18 @@ class HomeDeliveryPanel extends HTMLElement {
         outline: none;
         border-color: var(--hd-accent);
         box-shadow: 0 0 0 2px var(--hd-accent-dim);
+      }
+
+      .daily-digest-repeat-row {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: var(--space-3);
+      }
+
+      @media (max-width: 640px) {
+        .daily-digest-repeat-row {
+          grid-template-columns: 1fr;
+        }
       }
 
       .form-row {
