@@ -51,12 +51,25 @@ UPS_PARSE_EVENTS_JS = """
 
 UPS_PARSE_SUMMARY_JS = """
 () => {
-  const statusLine = Array.from(document.querySelectorAll("p, span, strong, div"))
-    .map((el) => (el.innerText || "").trim())
-    .find((text) => /^(Delivered|Out for Delivery|On the Way|Label Created|We Have Your Package)/i.test(text));
-  const detailLine = Array.from(document.querySelectorAll("p, span, div"))
-    .map((el) => (el.innerText || "").trim())
-    .find((text) => /Left at|Front Door|Mailbox|Delivered To|Out For Delivery Today/i.test(text));
+  // Scope to tracking results — never scan global nav/footer (UPS Store "Mailbox").
+  const root =
+    document.querySelector("app-track-details") ||
+    document.querySelector("main") ||
+    document.body;
+
+  const nodes = Array.from(
+    root.querySelectorAll("h1, h2, h3, p, span, strong, div")
+  );
+  const texts = nodes
+    .map((el) => (el.innerText || "").trim().replace(/\\s+/g, " "))
+    .filter((text) => text && text.length < 120);
+
+  const statusLine = texts.find((text) =>
+    /^(Delivered|Out for Delivery|On the Way|Label Created|We Have Your Package)\\b/i.test(text)
+  );
+  const detailLine = texts.find((text) =>
+    /^(Left at|Delivered To|Out For Delivery Today)\\b|Front Door|Garage|Porch|Side Door/i.test(text)
+  );
   return {
     status: statusLine || "",
     detail: detailLine || "",
@@ -159,16 +172,65 @@ def build_tracking_result(
     return result
 
 
+async def _dismiss_ups_overlays(page: Page) -> None:
+    """Close cookie/chat/service-alert overlays that can block Show Details."""
+    for selector in (
+        'button[aria-label="Close All Service Alerts"]',
+        'button:has-text("Dismiss All")',
+        'button:has-text("Dismiss Service Alert")',
+        '#onetrust-accept-btn-handler',
+        'button:has-text("Accept All Cookies")',
+        'button:has-text("Accept Cookies")',
+        'button[aria-label="Close chat window"]',
+        'button[aria-label="Minimize chat"]',
+    ):
+        loc = page.locator(selector)
+        try:
+            if await loc.count() == 0:
+                continue
+            await loc.first.click(timeout=1500, force=True)
+            await page.wait_for_timeout(400)
+        except Exception:
+            continue
+
+    # OneTrust / cookie banner sometimes only exposes a generic Close.
+    try:
+        dialog_close = page.locator(
+            '[role="dialog"] button:has-text("Close"), '
+            '[aria-label*="cookie" i] button:has-text("Close")'
+        )
+        if await dialog_close.count() > 0:
+            await dialog_close.first.click(timeout=1500, force=True)
+            await page.wait_for_timeout(300)
+    except Exception:
+        pass
+
+
 async def expand_ups_details(page: Page) -> None:
     """Open UPS Package History (Show Details)."""
+    await _dismiss_ups_overlays(page)
+
+    if await page.locator("#shipProg_act_Date0").count() > 0:
+        return
+
+    # Already expanded.
+    if await page.locator("button:has-text('Hide Details')").count() > 0:
+        try:
+            await page.wait_for_selector("#shipProg_act_Date0", timeout=10000)
+        except Exception:
+            pass
+        return
+
     for locator in (
         page.get_by_role("button", name="Show Details"),
         page.locator("button:has-text('Show Details')"),
+        page.locator("button:has(strong:has-text('Show Details'))"),
     ):
         if await locator.count() == 0:
             continue
         try:
-            await locator.first.click()
+            await locator.first.scroll_into_view_if_needed()
+            await locator.first.click(timeout=5000)
             await page.wait_for_selector("#shipProg_act_Date0", timeout=15000)
             await page.wait_for_timeout(800)
             logger.debug("UPS Show Details opened")
@@ -176,10 +238,30 @@ async def expand_ups_details(page: Page) -> None:
         except Exception as exc:
             logger.debug("UPS Show Details click failed: %s", exc)
 
-    # Already expanded if Hide Details is visible.
-    if await page.locator("button:has-text('Hide Details')").count() > 0:
-        await page.wait_for_selector("#shipProg_act_Date0", timeout=10000)
-        return
+    # Fallback: JS click (chat/cookie overlays can steal Playwright clicks).
+    clicked = await page.evaluate(
+        """() => {
+          const candidates = Array.from(
+            document.querySelectorAll("button, a, [role='button'], span, strong")
+          );
+          const el = candidates.find((node) =>
+            /\\bShow Details\\b/i.test(
+              (node.innerText || node.textContent || "").replace(/\\s+/g, " ")
+            )
+          );
+          if (!el) return false;
+          const target = el.closest("button, a, [role='button']") || el;
+          target.click();
+          return true;
+        }"""
+    )
+    if clicked:
+        try:
+            await page.wait_for_selector("#shipProg_act_Date0", timeout=15000)
+            await page.wait_for_timeout(800)
+            logger.debug("UPS Show Details opened via JS click")
+        except Exception as exc:
+            logger.debug("UPS Show Details JS expand failed: %s", exc)
 
 
 async def expand_usps_history(page: Page) -> None:
@@ -207,6 +289,11 @@ async def parse_ups_tracking(page: Page) -> dict[str, Any]:
     """Expand UPS details and parse full package history."""
     await expand_ups_details(page)
 
+    # One more beat if expand raced the Angular render.
+    if await page.locator("#shipProg_act_Date0").count() == 0:
+        await page.wait_for_timeout(1500)
+        await expand_ups_details(page)
+
     events = await page.evaluate(UPS_PARSE_EVENTS_JS)
     summary = await page.evaluate(UPS_PARSE_SUMMARY_JS)
 
@@ -216,8 +303,13 @@ async def parse_ups_tracking(page: Page) -> dict[str, Any]:
         status = events[0].get("milestone") or events[0].get("description", "")
         status_detail = events[0].get("activity") or ""
     else:
-        status = summary.get("status", "")
-        status_detail = summary.get("detail", "")
+        status = (summary.get("status") or "").strip()
+        status_detail = (summary.get("detail") or "").strip()
+        # Never promote long nav blobs if summary still misfires.
+        if status and ("\n" in status or len(status) > 80):
+            status = ""
+        if status_detail and ("\n" in status_detail or len(status_detail) > 120):
+            status_detail = ""
 
     logger.info("UPS parsed %s history events", len(events))
     return build_tracking_result(events, status, status_detail)

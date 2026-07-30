@@ -53,7 +53,7 @@ async def _fetch_ups(page, tracking_number: str) -> dict[str, Any]:
     url = get_tracking_url("ups", tracking_number)
     await goto_tracking_page(page, url, timeout_ms=60000)
 
-    if not await wait_for_ups_tracking(page, tracking_number, timeout_ms=30000):
+    if not await wait_for_ups_tracking(page, tracking_number, timeout_ms=45000):
         return {"error": "UPS tracking content not found"}
 
     return await parse_ups_tracking(page)

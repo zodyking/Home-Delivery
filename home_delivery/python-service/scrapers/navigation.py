@@ -44,9 +44,9 @@ async def goto_tracking_page(page: Page, url: str, timeout_ms: int = 45000) -> N
             "Sec-Fetch-Site": "same-site",
         })
     elif "ups.com" in url:
+        # Referer only — never set Sec-Fetch-* on the page (applies to XHR too).
         await page.set_extra_http_headers({
             "Referer": "https://www.ups.com/",
-            "Sec-Fetch-Site": "same-origin",
         })
     elif "fedex.com" in url:
         await page.set_extra_http_headers({
@@ -147,50 +147,47 @@ async def wait_for_usps_tracking(page: Page, timeout_ms: int = 45000) -> bool:
 async def wait_for_ups_tracking(
     page: Page,
     tracking_number: str,
-    timeout_ms: int = 30000,
+    timeout_ms: int = 45000,
 ) -> bool:
     """
-    Wait for UPS tracking UI (headline or expanded timeline).
+    Wait until the UPS tracking results UI is actually ready.
 
-    Waits for tracking number to appear in page text or for specific
-    UPS tracking DOM elements.
+    Requires real result chrome (Show/Hide Details, shipment progress, or
+    stApp result nodes) — not merely the tracking number in HTML/source/nav.
     """
+    _ = tracking_number  # call-site compatibility; readiness is DOM-based
+    ready_js = """() => {
+        if (document.getElementById("shipProg_act_Date0")) return true;
+        if (document.querySelector("ups-shipment-progress")) return true;
+        if (document.getElementById("stApp_copytrackingnumber")) return true;
+        const buttons = Array.from(
+            document.querySelectorAll("button, a, [role='button']")
+        );
+        return buttons.some((el) => {
+            const text = (el.innerText || el.textContent || "").replace(/\\s+/g, " ");
+            return /\\b(Show Details|Hide Details)\\b/i.test(text);
+        });
+    }"""
+
+    try:
+        await page.wait_for_function(ready_js, timeout=timeout_ms)
+        return True
+    except Exception:
+        pass
+
     selectors = (
         "#shipProg_act_Date0",
         "ups-shipment-progress",
-        "text=Tracking Details",
+        "#stApp_copytrackingnumber",
+        "button:has-text('Show Details')",
+        "button:has-text('Hide Details')",
     )
-    tracking_upper = tracking_number.upper()
-
-    try:
-        await page.wait_for_function(
-            """(tracking) => {
-                const text = document.body?.innerText || "";
-                if (text.toUpperCase().includes(tracking)) return true;
-                return !!document.getElementById("shipProg_act_Date0")
-                    || !!document.querySelector("ups-shipment-progress");
-            }""",
-            tracking_upper,
-            timeout=timeout_ms,
-        )
-        return True
-    except Exception:
-        for selector in selectors:
-            try:
-                await page.wait_for_selector(selector, timeout=3000)
-                return True
-            except Exception:
-                continue
-
-    # Final fallback: check if page has any tracking-related content
-    content = await page.content()
-    lower = content.lower()
-
-    if tracking_number.lower() in lower:
-        return True
-
-    if any(marker in lower for marker in ("shipprog_act_", "ups-shipment-progress")):
-        return True
+    for selector in selectors:
+        try:
+            await page.wait_for_selector(selector, timeout=2500)
+            return True
+        except Exception:
+            continue
 
     return False
 

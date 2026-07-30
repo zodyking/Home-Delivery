@@ -26,6 +26,8 @@ async def _get_browser() -> Browser:
         if _browser is None or not _browser.is_connected():
             logger.info("Launching Chromium browser...")
             _playwright = await async_playwright().start()
+            # NOTE: Do not pass --disable-http2. UPS Track/GetStatus XHR hangs
+            # without HTTP/2 even though document navigation may still work.
             _browser = await _playwright.chromium.launch(
                 headless=True,
                 args=[
@@ -35,7 +37,6 @@ async def _get_browser() -> Browser:
                     "--disable-dev-shm-usage",
                     "--disable-gpu",
                     "--disable-blink-features=AutomationControlled",
-                    "--disable-http2",
                 ],
             )
             logger.info("Browser launched successfully")
@@ -85,18 +86,14 @@ async def get_page(timeout_ms: int = 30000) -> AsyncGenerator[Page, None]:
                 "AppleWebKit/537.36 (KHTML, like Gecko) "
                 "Chrome/150.0.0.0 Safari/537.36"
             ),
+            # Only Client Hints + language. Do NOT set Accept / Sec-Fetch-* /
+            # Upgrade-Insecure-Requests here — context headers apply to every
+            # request, including UPS Track/GetStatus XHR, and break the API.
             extra_http_headers={
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-                "Accept-Encoding": "gzip, deflate, br, zstd",
                 "Accept-Language": "en-US,en;q=0.9",
                 "Sec-Ch-Ua": '"Not;A=Brand";v="8", "Chromium";v="150", "Google Chrome";v="150"',
                 "Sec-Ch-Ua-Mobile": "?0",
                 "Sec-Ch-Ua-Platform": '"Windows"',
-                "Sec-Fetch-Dest": "document",
-                "Sec-Fetch-Mode": "navigate",
-                "Sec-Fetch-Site": "none",
-                "Sec-Fetch-User": "?1",
-                "Upgrade-Insecure-Requests": "1",
             },
             ignore_https_errors=True,
         )
