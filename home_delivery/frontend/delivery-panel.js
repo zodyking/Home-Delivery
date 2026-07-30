@@ -3427,7 +3427,7 @@ class HomeDeliveryPanel extends HTMLElement {
           step: 2,
           tracking: pkg.tracking_number || "",
           carrier: pkg.carrier || null,
-          recipient: "",
+          recipient: this._isPlaceholderRecipient(pkg.recipient) ? "" : (pkg.recipient || ""),
           destinationAccountId: pkg.destination_account_id || pkg.source_account_id || null,
           destinationOther: pkg.destination || "",
           destinationMode: (pkg.destination_account_id || pkg.source_account_id) ? "account" : (pkg.destination ? "other" : null),
