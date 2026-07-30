@@ -16,7 +16,7 @@ from typing import Any
 import aiohttp
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -31,7 +31,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Code version for deployment verification
-CODE_VERSION = "1.0.0"
+CODE_VERSION = "0.0.1"
 
 app = FastAPI(title="Home Delivery API")
 
@@ -678,16 +678,30 @@ async def get_state():
 # Frontend Static Files
 # ============================================================================
 
-# Mount frontend at root (after API routes)
 frontend_path = Path(__file__).parent.parent / "frontend"
-if frontend_path.exists():
-    app.mount("/", StaticFiles(directory=str(frontend_path), html=True), name="frontend")
 
 
 @app.get("/")
 async def serve_index():
-    """Serve the frontend index.html."""
+    """Serve index.html with a versioned panel script URL for cache busting."""
     index_path = frontend_path / "index.html"
-    if index_path.exists():
-        return FileResponse(index_path)
-    return JSONResponse({"message": "Home Delivery API", "version": CODE_VERSION})
+    if not index_path.exists():
+        return JSONResponse({"message": "Home Delivery API", "version": CODE_VERSION})
+
+    html = index_path.read_text(encoding="utf-8")
+    html = html.replace(
+        "__PANEL_VERSION__",
+        CODE_VERSION,
+    )
+    return HTMLResponse(
+        html,
+        headers={
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Pragma": "no-cache",
+        },
+    )
+
+
+# Mount remaining frontend assets (delivery-panel.js, etc.) after explicit routes.
+if frontend_path.exists():
+    app.mount("/", StaticFiles(directory=str(frontend_path), html=True), name="frontend")

@@ -1,7 +1,7 @@
 {
   "domain": "home_delivery",
   "name": "Home Delivery",
-  "version": "1.0.0",
+  "version": "0.0.1",
   "documentation": "https://github.com/zodyking/Home-Delivery",
   "issue_tracker": "https://github.com/zodyking/Home-Delivery/issues",
   "dependencies": [],

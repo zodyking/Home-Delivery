@@ -2,6 +2,8 @@
  * Home Delivery Panel - Vanilla JS for HA custom panel / standalone Ingress
  * Design aligned with home-weather: topbar + gear settings, dashboard layout.
  */
+const PANEL_VERSION = "0.0.1";
+
 class HomeDeliveryPanel extends HTMLElement {
   constructor() {
     super();
@@ -36,8 +38,12 @@ class HomeDeliveryPanel extends HTMLElement {
 
   connectedCallback() {
     this._mediaQuery = window.matchMedia("(max-width: 768px)");
-    this._onMediaChange = () => this._render();
+    this._onMediaChange = () => {
+      this._syncHaLayoutVars();
+      this._render();
+    };
     this._mediaQuery.addEventListener("change", this._onMediaChange);
+    this._syncHaLayoutVars();
     this._render();
     this._loadConfig();
   }
@@ -76,6 +82,36 @@ class HomeDeliveryPanel extends HTMLElement {
     const path = window.location.pathname;
     const match = path.match(/^(\/api\/hassio_ingress\/[^/]+)/);
     return match ? match[1] : "";
+  }
+
+  _isHaEmbedded() {
+    const path = window.location.pathname || "";
+    return /\/api\/hassio_ingress\//.test(path) || /\/api\/ingress\//.test(path);
+  }
+
+  /** Hide in-panel title/hamburger when HA already renders the app header (ingress mobile). */
+  _showPanelTopbar() {
+    return !(this._isHaEmbedded() && this._isNarrow);
+  }
+
+  _syncHaLayoutVars() {
+    const host = this;
+    if (!host?.style) return;
+    try {
+      const haRoot = window.parent?.document?.documentElement;
+      if (!haRoot) return;
+      const haStyle = getComputedStyle(haRoot);
+      const headerHeight = haStyle.getPropertyValue("--header-height").trim();
+      if (headerHeight) {
+        host.style.setProperty("--header-height", headerHeight);
+      }
+      const fontFamily = haStyle.getPropertyValue("--paper-font-body1_-_font-family").trim();
+      if (fontFamily) {
+        host.style.setProperty("--hd-font-family", fontFamily);
+      }
+    } catch (_) {
+      // Standalone or cross-origin — fall back to CSS defaults.
+    }
   }
 
   async _fetchApi(endpoint, options = {}) {
@@ -361,7 +397,11 @@ class HomeDeliveryPanel extends HTMLElement {
     set("--shadow-md", shadows.md);
     set("--shadow-lg", shadows.lg);
 
+    set("--primary-text-color", t.text);
+    set("--secondary-text-color", t.muted);
+    set("--panel-header-background", t.surface);
     host.setAttribute("data-hd-theme", mode);
+    this._syncHaLayoutVars();
   }
 
   // ============================================================================
@@ -863,7 +903,7 @@ class HomeDeliveryPanel extends HTMLElement {
     if (this._currentView === "settings") {
       s.innerHTML = `
         <style>${this._getStyles()}</style>
-        <div class="settings-view ${this._isNarrow ? "narrow" : ""}">
+        <div class="settings-view ${this._isNarrow ? "narrow" : ""} ${this._isHaEmbedded() ? "ha-embedded" : ""}">
           ${this._renderSettingsMenubar()}
           <div class="settings-body">
             ${this._renderSettingsContent()}
@@ -879,24 +919,9 @@ class HomeDeliveryPanel extends HTMLElement {
 
     s.innerHTML = `
       <style>${this._getStyles()}</style>
-      <div class="hud-wrapper">
+      <div class="hud-wrapper ${this._isHaEmbedded() ? "ha-embedded" : ""} ${this._isNarrow ? "narrow" : ""}">
         <div class="delivery-app">
-          <header class="topbar">
-            ${this._isNarrow ? `<button class="hamburger icon-btn" id="hamburger-btn" aria-label="Menu">
-              <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M3 18h18v-2H3v2zm0-5h18v-2H3v2zm0-7v2h18V6H3z"/></svg>
-            </button>` : ""}
-            <section class="title-card">
-              <div class="title-wrap">
-                <div class="title">Home Delivery</div>
-              </div>
-            </section>
-            <button class="icon-btn" id="refresh-btn" aria-label="Refresh" ${this._refreshingAll ? "disabled" : ""}>
-              <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor" class="${this._refreshingAll ? "spinning" : ""}"><path d="M17.65 6.35A7.958 7.958 0 0012 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08A5.99 5.99 0 0112 18c-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/></svg>
-            </button>
-            <button class="icon-btn" id="gear-btn" aria-label="Settings">
-              <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 00.12-.61l-1.92-3.32a.488.488 0 00-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.484.484 0 00-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58a.49.49 0 00-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/></svg>
-            </button>
-          </header>
+          ${this._renderDashboardTopbar()}
           <div class="content-area">
             ${this._loading ? this._renderLoading() : ""}
             ${this._error && !this._loading ? this._renderError() : ""}
@@ -909,6 +934,63 @@ class HomeDeliveryPanel extends HTMLElement {
     `;
 
     this._bindEvents();
+  }
+
+  _renderTopbarActions() {
+    return `
+      <button class="icon-btn" id="refresh-btn" aria-label="Refresh" ${this._refreshingAll ? "disabled" : ""}>
+        <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor" class="${this._refreshingAll ? "spinning" : ""}"><path d="M17.65 6.35A7.958 7.958 0 0012 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08A5.99 5.99 0 0112 18c-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/></svg>
+      </button>
+      <button class="icon-btn" id="gear-btn" aria-label="Settings">
+        <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 00.12-.61l-1.92-3.32a.488.488 0 00-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.484.484 0 00-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58a.49.49 0 00-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/></svg>
+      </button>
+    `;
+  }
+
+  _renderDashboardTopbar() {
+    if (!this._showPanelTopbar()) {
+      return `<div class="embedded-toolbar">${this._renderTopbarActions()}</div>`;
+    }
+
+    return `
+      <header class="topbar">
+        ${this._isNarrow ? `<button class="hamburger icon-btn" id="hamburger-btn" aria-label="Open sidebar">
+          <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><path d="M3 18h18v-2H3v2zm0-5h18v-2H3v2zm0-7v2h18V6H3z"/></svg>
+        </button>` : ""}
+        <section class="title-card">
+          <div class="title-wrap">
+            <div class="title">Home Delivery</div>
+          </div>
+        </section>
+        ${this._renderTopbarActions()}
+      </header>
+    `;
+  }
+
+  _renderSettingsMenubar() {
+    const backLabel = "Back";
+    if (!this._showPanelTopbar()) {
+      return `
+        <div class="embedded-settings-bar">
+          <button type="button" class="hd-menubar-back" data-action="nav-back" aria-label="${backLabel}">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z"/></svg>
+            <span>${backLabel}</span>
+          </button>
+          <span class="settings-save-status" id="settings-save-status" role="status" aria-live="polite" data-state="${this._saveStatus}">${this._saveStatusText}</span>
+        </div>
+      `;
+    }
+
+    return `
+      <header class="hd-menubar">
+        <button type="button" class="hd-menubar-back" data-action="nav-back" aria-label="${backLabel}">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z"/></svg>
+          <span>${backLabel}</span>
+        </button>
+        <div class="hd-menubar-title">Settings</div>
+        <span class="settings-save-status" id="settings-save-status" role="status" aria-live="polite" data-state="${this._saveStatus}">${this._saveStatusText}</span>
+      </header>
+    `;
   }
 
   _renderLoading() {
@@ -1122,20 +1204,6 @@ class HomeDeliveryPanel extends HTMLElement {
           </div>
         </div>
       </div>
-    `;
-  }
-
-  _renderSettingsMenubar() {
-    const backLabel = "Back";
-    return `
-      <header class="hd-menubar">
-        <button type="button" class="hd-menubar-back" data-action="nav-back" aria-label="${backLabel}">
-          <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z"/></svg>
-          <span>${backLabel}</span>
-        </button>
-        <div class="hd-menubar-title">Settings</div>
-        <span class="settings-save-status" id="settings-save-status" role="status" aria-live="polite" data-state="${this._saveStatus}">${this._saveStatusText}</span>
-      </header>
     `;
   }
 
@@ -1877,7 +1945,8 @@ class HomeDeliveryPanel extends HTMLElement {
   _getStyles() {
     return `
       :host {
-        --header-height: 64px;
+        /* Inherit --header-height from Home Assistant when embedded; do not override. */
+        --hd-menubar-height: var(--header-height, 64px);
         --space-1: 4px;
         --space-2: 8px;
         --space-3: 12px;
@@ -1904,8 +1973,23 @@ class HomeDeliveryPanel extends HTMLElement {
         margin: 0;
         background: var(--hd-bg);
         color: var(--hd-text);
-        font-family: var(--paper-font-body1_-_font-family, "Roboto", "Segoe UI", sans-serif);
+        font-family: var(--hd-font-family, var(--paper-font-body1_-_font-family, "Roboto", "Segoe UI", sans-serif));
         line-height: 1.5;
+      }
+
+      :host button,
+      :host article,
+      :host section {
+        color: inherit;
+      }
+
+      :host article,
+      :host section {
+        background: transparent;
+      }
+
+      :host button {
+        font: inherit;
       }
 
       * { box-sizing: border-box; }
@@ -1988,6 +2072,25 @@ class HomeDeliveryPanel extends HTMLElement {
         overflow: hidden;
         text-overflow: ellipsis;
         color: var(--hd-text);
+        font-family: inherit;
+      }
+
+      .embedded-toolbar {
+        display: flex;
+        align-items: center;
+        justify-content: flex-end;
+        gap: var(--space-2);
+        padding: var(--space-2) calc(var(--space-3) + var(--safe-right)) var(--space-2) calc(var(--space-3) + var(--safe-left));
+        background: transparent;
+      }
+
+      .embedded-settings-bar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: var(--space-3);
+        padding: var(--space-2) calc(var(--space-4) + var(--safe-right)) var(--space-2) calc(var(--space-4) + var(--safe-left));
+        background: transparent;
       }
 
       .icon-btn {
@@ -2639,8 +2742,11 @@ class HomeDeliveryPanel extends HTMLElement {
         z-index: 100;
         display: flex;
         align-items: center;
-        height: var(--header-height);
-        padding: 0 var(--space-4);
+        box-sizing: border-box;
+        height: var(--header-height, 64px);
+        min-height: var(--header-height, 64px);
+        max-height: var(--header-height, 64px);
+        padding: 0 calc(var(--space-4) + var(--safe-right)) 0 calc(var(--space-4) + var(--safe-left));
         background: var(--hd-surface);
         border-bottom: 1px solid var(--hd-border-strong);
         gap: var(--space-3);
@@ -2666,8 +2772,11 @@ class HomeDeliveryPanel extends HTMLElement {
       }
 
       .hd-menubar-title {
-        font-size: 16px;
+        font-size: clamp(15px, 1.8vw, 18px);
+        line-height: 1.2;
         font-weight: 600;
+        letter-spacing: -0.02em;
+        color: var(--hd-text);
         flex: 1;
       }
 

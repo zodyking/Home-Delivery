@@ -13,6 +13,8 @@ ROOT = Path(__file__).resolve().parents[1]
 CONFIG = ROOT / "home_delivery" / "config.yaml"
 MAIN_PY = ROOT / "home_delivery" / "python-service" / "main.py"
 API_RUN = ROOT / "home_delivery" / "rootfs" / "etc" / "s6-overlay" / "s6-rc.d" / "api" / "run"
+MANIFEST = ROOT / "home_delivery" / "integration" / "home_delivery" / "manifest.json"
+PANEL_JS = ROOT / "home_delivery" / "frontend" / "delivery-panel.js"
 
 
 def read_version() -> str:
@@ -58,6 +60,28 @@ def write_version(version: str) -> None:
     if n != 1:
         raise SystemExit(f"Could not update startup log in {API_RUN}")
     API_RUN.write_text(run_text, encoding="utf-8")
+
+    manifest_text = MANIFEST.read_text(encoding="utf-8")
+    manifest_text, n = re.subn(
+        r'"version":\s*"[\d.]+"',
+        f'"version": "{version}"',
+        manifest_text,
+        count=1,
+    )
+    if n != 1:
+        raise SystemExit(f"Could not update version in {MANIFEST}")
+    MANIFEST.write_text(manifest_text, encoding="utf-8")
+
+    panel_text = PANEL_JS.read_text(encoding="utf-8")
+    panel_text, n = re.subn(
+        r'const PANEL_VERSION = "[^"]+";',
+        f'const PANEL_VERSION = "{version}";',
+        panel_text,
+        count=1,
+    )
+    if n != 1:
+        raise SystemExit(f"Could not update PANEL_VERSION in {PANEL_JS}")
+    PANEL_JS.write_text(panel_text, encoding="utf-8")
 
 
 def main() -> None:
