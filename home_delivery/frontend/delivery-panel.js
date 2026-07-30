@@ -2,7 +2,7 @@
  * Home Delivery Panel - Vanilla JS for HA custom panel / standalone Ingress
  * Design aligned with home-weather: topbar + gear settings, dashboard layout.
  */
-const PANEL_VERSION = "0.0.4";
+const PANEL_VERSION = "0.0.5";
 
 class HomeDeliveryPanel extends HTMLElement {
   constructor() {
@@ -120,7 +120,16 @@ class HomeDeliveryPanel extends HTMLElement {
     });
     if (!resp.ok) {
       const text = await resp.text();
-      throw new Error(`API error ${resp.status}: ${text}`);
+      let detail = text;
+      try {
+        const parsed = JSON.parse(text);
+        if (parsed.detail) {
+          detail = typeof parsed.detail === "string" ? parsed.detail : JSON.stringify(parsed.detail);
+        }
+      } catch (_) {
+        // Plain-text error body
+      }
+      throw new Error(detail || `API error ${resp.status}`);
     }
     return resp.json();
   }

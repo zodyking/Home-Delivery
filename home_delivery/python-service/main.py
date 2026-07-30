@@ -31,7 +31,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Code version for deployment verification
-CODE_VERSION = "0.0.4"
+CODE_VERSION = "0.0.5"
 
 app = FastAPI(title="Home Delivery API")
 
@@ -225,7 +225,11 @@ async def probe_carrier_endpoint(request: ProbeCarrierRequest):
     """Probe carriers to detect which one a tracking number belongs to."""
     from carrier_probe import probe_carrier_result
 
-    result = await probe_carrier_result(request.tracking_number)
+    try:
+        result = await probe_carrier_result(request.tracking_number)
+    except Exception as exc:
+        logger.exception("Carrier probe failed for %s", request.tracking_number)
+        raise HTTPException(status_code=500, detail=f"Carrier probe failed: {exc}") from exc
 
     if result.get("error"):
         raise HTTPException(status_code=400, detail=result["error"])

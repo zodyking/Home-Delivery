@@ -224,24 +224,31 @@ BROWSER_PROBE_FUNCTIONS = {
 
 
 async def _race_carrier_tasks(tasks: dict[asyncio.Task, CarrierType]) -> CarrierType | None:
+    """Return the carrier for the first probe task that reports a match."""
+    pending = set(tasks)
     try:
-        for finished in asyncio.as_completed(tasks):
-            carrier = tasks[finished]
-            try:
-                matched = await finished
-            except asyncio.CancelledError:
-                continue
-            except Exception as exc:
-                logger.warning("Link probe task failed for %s: %s", carrier, exc)
-                continue
+        while pending:
+            done, pending = await asyncio.wait(
+                pending,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for task in done:
+                carrier = tasks[task]
+                try:
+                    matched = task.result()
+                except asyncio.CancelledError:
+                    continue
+                except Exception as exc:
+                    logger.warning("Link probe task failed for %s: %s", carrier, exc)
+                    continue
 
-            if matched:
-                return carrier
+                if matched:
+                    return carrier
     finally:
-        for task in tasks:
-            if not task.done():
-                task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
 
     return None
 
