@@ -1,8 +1,9 @@
 """
 Carrier tracking URL generation.
 
-Carrier detection is done by probing these URLs (see carrier_probe.py),
-not by hard-coded tracking-number patterns.
+Carrier detection is done by probing tracking URLs (see carrier_probe.py).
+Format inference in infer_carrier_from_format() is a last resort when HTTP and
+browser link probes are blocked or inconclusive.
 """
 from __future__ import annotations
 
@@ -64,7 +65,7 @@ def infer_carrier_from_format(tracking_number: str) -> CarrierType | None:
     """
     Infer carrier from tracking-number shape when link probing is blocked.
 
-    Used only as a last resort after HTTP and browser probes fail (e.g. Akamai).
+    Used only as a last resort after HTTP and browser link probes fail (e.g. Akamai).
     """
     cleaned = normalize_tracking_number(tracking_number)
     if not cleaned:

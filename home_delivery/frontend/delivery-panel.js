@@ -314,8 +314,8 @@ class HomeDeliveryPanel extends HTMLElement {
       }
       this._packages = packagesResp.packages || [];
       this._mailState = mailResp;
-      this._mediaPlayers = entitiesResp.media_players || [];
-      this._ttsEntities = entitiesResp.tts_entities || [];
+      this._mediaPlayers = this._normalizeHaEntityList(entitiesResp.media_players);
+      this._ttsEntities = this._normalizeHaEntityList(entitiesResp.tts_entities);
 
       if (this._settings.appearance && this._settings.appearance.mode) {
         this._settings.appearance = {
@@ -743,44 +743,34 @@ class HomeDeliveryPanel extends HTMLElement {
     const catalog = {
       usps: {
         label: "USPS",
-        service: "USPS Ground Advantage",
-        className: "Parcel Select",
-        subtitle: "Package Tracking Service",
+        service: "Ground Advantage",
+        subtitle: "Package Tracking",
         logoLocal: "usps.svg",
-        logoRemote: "",
       },
       ups: {
         label: "UPS",
-        service: "UPS Ground",
-        className: "Package",
-        subtitle: "Package Tracking Service",
+        service: "Ground",
+        subtitle: "Package Tracking",
         logoLocal: "ups.svg",
-        logoRemote: "https://www.ups.com/assets/resources/webcontent/images/ups-logo.svg",
       },
       fedex: {
         label: "FedEx",
-        service: "FedEx Ground",
-        className: "Express",
-        subtitle: "Package Tracking Service",
+        service: "Ground",
+        subtitle: "Package Tracking",
         logoLocal: "fedex.svg",
-        logoRemote: "https://upload.wikimedia.org/wikipedia/commons/9/9d/FedEx_Corporation_-_2016_Logo.svg",
       },
       estes: {
         label: "Estes",
-        service: "Estes LTL Freight",
-        className: "Freight",
-        subtitle: "Shipment Tracking Service",
+        service: "LTL Freight",
+        subtitle: "Shipment Tracking",
         logoLocal: "estes.svg",
-        logoRemote: "https://upload.wikimedia.org/wikipedia/commons/8/8a/Estes_Express_Lines_logo.svg",
       },
     };
     return catalog[key] || {
       label: (carrier || "?").toString().toUpperCase(),
-      service: "Carrier Tracking",
-      className: "Package",
-      subtitle: "Package Tracking Service",
+      service: "Tracking",
+      subtitle: "Package Tracking",
       logoLocal: null,
-      logoRemote: null,
     };
   }
 
@@ -789,21 +779,17 @@ class HomeDeliveryPanel extends HTMLElement {
     const local = meta.logoLocal
       ? this._apiUrl(`/assets/carriers/${meta.logoLocal}`)
       : "";
-    // Prefer bundled asset for HA/offline; fall back to Wikimedia remote, then text.
-    const src = local || meta.logoRemote || "";
-    const remoteFallback = local && meta.logoRemote ? meta.logoRemote : "";
-    if (!src) {
+    if (!local) {
       return `<span class="carrier-logo-text">${this._esc(meta.label)}</span>`;
     }
     return `
       <img
         class="carrier-logo-img carrier-logo-${this._carrierClass(carrier)}"
-        src="${this._esc(src)}"
+        src="${this._esc(local)}"
         alt="${this._esc(meta.label)}"
         loading="lazy"
         decoding="async"
-        data-remote="${this._esc(remoteFallback)}"
-        onerror="if(this.dataset.remote){this.src=this.dataset.remote;this.removeAttribute('data-remote');}else{this.style.display='none';const t=this.nextElementSibling;if(t)t.hidden=false;}"
+        onerror="this.style.display='none';const t=this.nextElementSibling;if(t)t.hidden=false;"
       />
       <span class="carrier-logo-text" hidden>${this._esc(meta.label)}</span>
     `;
@@ -819,24 +805,6 @@ class HomeDeliveryPanel extends HTMLElement {
     const key = this._carrierClass(carrier);
     const c = colors[key] || { bg: "#666", text: "#fff", label: carrier?.toUpperCase() || "?" };
     return `<span class="carrier-badge" style="background:${c.bg};color:${c.text}">${c.label}</span>`;
-  }
-
-  _formatTrackingDisplay(tracking) {
-    const digits = String(tracking || "").replace(/\s+/g, "");
-    if (!digits) return "";
-    // Group into readable barcode-style chunks.
-    return digits.replace(/(.{4})/g, "$1 ").trim();
-  }
-
-  _packageRouteCode(destination, recipient) {
-    const dest = String(destination || "");
-    const apt = dest.match(/\b(?:APT|APARTMENT|UNIT|#)\s*([A-Z0-9-]+)\b/i);
-    if (apt?.[1]) return apt[1].toUpperCase().slice(0, 4);
-    const zip = dest.match(/\b(\d{5})(?:-\d{4})?\b/);
-    if (zip?.[1]) return zip[1].slice(-3);
-    const name = String(recipient || "").trim();
-    if (name) return name.slice(0, 2).toUpperCase();
-    return "—";
   }
 
   _packageAddressLines(destination) {
@@ -856,20 +824,6 @@ class HomeDeliveryPanel extends HTMLElement {
     const city = loc.split(",")[0]?.trim();
     if (city) return city.slice(0, 3);
     return "—";
-  }
-
-  _barcodeStyle(tracking) {
-    // Deterministic faux barcode from tracking digits (visual only).
-    const s = String(tracking || "HOMEDELIVERY");
-    const stops = [];
-    let x = 0;
-    for (let i = 0; i < 48 && x < 100; i++) {
-      const n = s.charCodeAt(i % s.length) + i * 7;
-      const bar = 0.8 + (n % 3) * 0.7;
-      stops.push(`#111 ${x.toFixed(2)}% ${(x + bar).toFixed(2)}%`);
-      x += bar + 0.7 + (n % 2) * 0.5;
-    }
-    return `linear-gradient(90deg, ${stops.join(", ")}, transparent)`;
   }
 
   _statusClass(pkg) {
@@ -1765,7 +1719,7 @@ class HomeDeliveryPanel extends HTMLElement {
               <div class="history-letter-meta">
                 <div class="detail-row">
                   <span class="detail-label">From</span>
-                  <span class="detail-value">${this._esc(letter.from_name || "Unknown")}</span>
+                  <span class="detail-value">${this._esc(letter.from_name || letter.from_address?.split(",")[0] || "—")}</span>
                 </div>
                 ${letter.from_address ? `
                   <div class="detail-row">
@@ -1775,7 +1729,7 @@ class HomeDeliveryPanel extends HTMLElement {
                 ` : ""}
                 <div class="detail-row">
                   <span class="detail-label">For</span>
-                  <span class="detail-value">${this._esc(letter.to_name || "Unknown")}</span>
+                  <span class="detail-value">${this._esc(letter.to_name || letter.to_address?.split(",")[0] || "—")}</span>
                 </div>
                 ${letter.to_address ? `
                   <div class="detail-row">
@@ -1851,8 +1805,6 @@ class HomeDeliveryPanel extends HTMLElement {
     const carrierKey = this._carrierClass(pkg.carrier);
     const meta = this._carrierMeta(pkg.carrier);
     const tracking = String(pkg.tracking_number || "");
-    const trackingSpaced = this._formatTrackingDisplay(tracking);
-    const routeCode = this._packageRouteCode(destination, forName);
     const addressLines = this._packageAddressLines(destination);
     const recipientDisplay = forName || (needsDetails ? "Add recipient" : "Someone");
     const eventTitle = detail || statusLabel || "Status update";
@@ -1865,7 +1817,6 @@ class HomeDeliveryPanel extends HTMLElement {
     const sourceLine = pkg.auto_discovered
       ? "Source: Informed Delivery"
       : (pkg.error ? `Error: ${pkg.error}` : "");
-    const barcodeBg = this._barcodeStyle(tracking);
 
     return `
       <article class="package-card ${statusClass} carrier-${carrierKey}${needsDetails ? " needs-details" : ""}${pkg.delivered ? " is-delivered" : ""}" data-package-id="${pkg.id}">
@@ -1878,17 +1829,12 @@ class HomeDeliveryPanel extends HTMLElement {
               <strong>${this._esc(meta.service)}</strong>
               <span>${this._esc(meta.subtitle)}</span>
             </div>
-            <div class="route-code" title="Route / unit">${this._esc(routeCode)}</div>
           </header>
 
           <section class="label-meta">
             <div class="tracking-summary">
               <div class="small-label">Tracking number</div>
               <div class="tracking-number" title="${this._esc(tracking)}">${this._esc(tracking)}</div>
-            </div>
-            <div class="package-class">
-              <strong>${this._esc(meta.label)}</strong>
-              <span>${this._esc(meta.className)}</span>
             </div>
           </section>
 
@@ -1910,12 +1856,6 @@ class HomeDeliveryPanel extends HTMLElement {
                 </div>
               ` : ""}
             </div>
-          </section>
-
-          <section class="barcode-section" aria-hidden="true">
-            <div class="small-label">${this._esc(meta.label)} tracking barcode</div>
-            <div class="barcode" style="background:${barcodeBg}"></div>
-            <div class="barcode-number">${this._esc(trackingSpaced || tracking)}</div>
           </section>
 
           <section class="tracking-event">
@@ -2068,6 +2008,35 @@ class HomeDeliveryPanel extends HTMLElement {
     return String(entityId).split(".").pop() || entityId;
   }
 
+  _normalizeHaEntityList(items) {
+    return (items || []).map((item) => {
+      if (typeof item === "string") {
+        return { entity_id: item, friendly_name: this._entityFriendlyName(item) };
+      }
+      const entity_id = item?.entity_id || "";
+      const friendly_name = item?.friendly_name || this._entityFriendlyName(entity_id);
+      return { entity_id, friendly_name };
+    }).filter((item) => item.entity_id);
+  }
+
+  _haEntityId(item) {
+    return typeof item === "string" ? item : (item?.entity_id || "");
+  }
+
+  _haEntityLabel(item) {
+    if (typeof item === "string") return this._entityFriendlyName(item);
+    return item?.friendly_name || this._entityFriendlyName(item?.entity_id);
+  }
+
+  _haEntityOptionText(item) {
+    const id = this._haEntityId(item);
+    const label = this._haEntityLabel(item);
+    if (label && label !== id && !id.endsWith(label)) {
+      return `${label} (${id})`;
+    }
+    return id;
+  }
+
   _renderCollapsibleSection(id, title, subtitle, content, {
     hasToggle = false,
     toggleId = "",
@@ -2148,10 +2117,10 @@ class HomeDeliveryPanel extends HTMLElement {
     const title = this._entityFriendlyName(m.entity_id);
     const configured = m.tts_entity_id ? "Configured" : "Not configured";
     const subtitle = `${configured} · ${m.tts_entity_id ? m.tts_entity_id.replace(/^tts\./, "") : "No TTS"}`;
-    const haPlayers = this._mediaPlayers || [];
-    const ttsEntities = this._ttsEntities || [];
-    const entityOptions = [...new Set([m.entity_id, ...haPlayers].filter(Boolean))];
-    const ttsOptions = [...new Set([m.tts_entity_id, ...ttsEntities].filter(Boolean))];
+    const haPlayers = this._normalizeHaEntityList(this._mediaPlayers);
+    const ttsEntities = this._normalizeHaEntityList(this._ttsEntities);
+    const entityIds = [...new Set([m.entity_id, ...haPlayers.map((p) => p.entity_id)].filter(Boolean))];
+    const ttsIds = [...new Set([m.tts_entity_id, ...ttsEntities.map((t) => t.entity_id)].filter(Boolean))];
     const vol = m.volume ?? 0.6;
     const optionsJson = this._escapeAttr(JSON.stringify(m.options || {}));
 
@@ -2161,7 +2130,10 @@ class HomeDeliveryPanel extends HTMLElement {
           <label>Media Player *</label>
           <div class="media-player-controls">
             <select class="media-player-select" data-field="entity_id">
-              ${entityOptions.map((e) => `<option value="${this._escapeAttr(e)}" ${e === m.entity_id ? "selected" : ""}>${this._escapeAttr(e)}</option>`).join("")}
+              ${entityIds.map((id) => {
+                const item = haPlayers.find((p) => p.entity_id === id) || { entity_id: id, friendly_name: this._entityFriendlyName(id) };
+                return `<option value="${this._escapeAttr(id)}" ${id === m.entity_id ? "selected" : ""}>${this._esc(this._haEntityOptionText(item))}</option>`;
+              }).join("")}
             </select>
             <button type="button" class="btn btn-secondary btn-icon" data-remove-media="${i}" aria-label="Remove player">Remove</button>
           </div>
@@ -2170,7 +2142,10 @@ class HomeDeliveryPanel extends HTMLElement {
           <label>TTS Entity *</label>
           <select class="media-player-tts-entity" data-field="tts_entity_id">
             <option value="">-- Select TTS Entity --</option>
-            ${ttsOptions.map((e) => `<option value="${this._escapeAttr(e)}" ${e === m.tts_entity_id ? "selected" : ""}>${this._escapeAttr(e)}</option>`).join("")}
+            ${ttsIds.map((id) => {
+              const item = ttsEntities.find((t) => t.entity_id === id) || { entity_id: id, friendly_name: this._entityFriendlyName(id) };
+              return `<option value="${this._escapeAttr(id)}" ${id === m.tts_entity_id ? "selected" : ""}>${this._esc(this._haEntityOptionText(item))}</option>`;
+            }).join("")}
           </select>
         </div>
         <div class="form-group">
@@ -2237,7 +2212,9 @@ class HomeDeliveryPanel extends HTMLElement {
     const mediaPlayers = this._settings.media_players || [];
     const messagePrefix = this._settings.message_prefix || "Message from Home Delivery";
     const configuredIds = new Set(mediaPlayers.map((m) => m.entity_id).filter(Boolean));
-    const availableMediaPlayers = (this._mediaPlayers || []).filter((e) => !configuredIds.has(e));
+    const availableMediaPlayers = (this._mediaPlayers || []).filter(
+      (e) => !configuredIds.has(this._haEntityId(e)),
+    );
 
     return `
       <section class="settings-pane ${activePane === "announcements" ? "active" : ""}" data-settings-pane="announcements">
@@ -2285,7 +2262,7 @@ class HomeDeliveryPanel extends HTMLElement {
           <div class="form-row media-player-add-row">
             <select id="media-player-add">
               <option value="">Add media player...</option>
-              ${availableMediaPlayers.map((e) => `<option value="${this._escapeAttr(e)}">${this._escapeAttr(e)}</option>`).join("")}
+              ${availableMediaPlayers.map((e) => `<option value="${this._escapeAttr(this._haEntityId(e))}">${this._esc(this._haEntityOptionText(e))}</option>`).join("")}
             </select>
             <button type="button" class="btn btn-secondary" id="add-media-btn">Add</button>
           </div>
@@ -3088,7 +3065,7 @@ class HomeDeliveryPanel extends HTMLElement {
         if (this._settings.media_players.some((m) => m.entity_id === entityId)) return;
         this._settings.media_players.push({
           entity_id: entityId,
-          tts_entity_id: (this._ttsEntities || [])[0] || "",
+          tts_entity_id: this._haEntityId((this._ttsEntities || [])[0]) || "",
           volume: 0.6,
           preroll_ms: 150,
           cache: true,
@@ -3980,7 +3957,7 @@ class HomeDeliveryPanel extends HTMLElement {
         overflow: hidden;
         border: 1px solid var(--hd-border);
         background: #fff;
-        aspect-ratio: 724 / 320;
+        aspect-ratio: 960 / 432;
       }
 
       .history-letter-preview img {
@@ -4013,10 +3990,13 @@ class HomeDeliveryPanel extends HTMLElement {
 
       .mail-hero-preview {
         width: 100%;
-        display: flex;
-        justify-content: center;
-        align-items: center;
+        display: block;
         min-height: 0;
+      }
+
+      .mail-hero-preview .mail-carousel,
+      .mail-hero-preview .mail-preview {
+        width: 100%;
       }
 
       .mail-hero-counts {
@@ -4079,8 +4059,9 @@ class HomeDeliveryPanel extends HTMLElement {
 
       .mail-preview img {
         width: 100%;
-        max-height: clamp(88px, 18vw, 140px);
-        object-fit: contain;
+        height: clamp(112px, 22vw, 168px);
+        max-height: clamp(112px, 22vw, 168px);
+        object-fit: cover;
         object-position: center;
         border-radius: var(--radius-md);
         border: 1px solid var(--hd-border);
@@ -4093,8 +4074,8 @@ class HomeDeliveryPanel extends HTMLElement {
         align-items: center;
         justify-content: center;
         width: 100%;
-        min-height: clamp(88px, 18vw, 140px);
-        aspect-ratio: 724 / 320;
+        height: clamp(112px, 22vw, 168px);
+        max-height: clamp(112px, 22vw, 168px);
         border-radius: var(--radius-md);
         border: 1px dashed var(--hd-border-strong);
         background: var(--hd-elevated);
@@ -4133,13 +4114,12 @@ class HomeDeliveryPanel extends HTMLElement {
         width: 100%;
         min-width: 0;
         max-width: 100%;
-        min-height: 0;
-        max-height: clamp(88px, 18vw, 140px);
-        aspect-ratio: 724 / 320;
+        height: clamp(112px, 22vw, 168px);
+        max-height: clamp(112px, 22vw, 168px);
         border-radius: var(--radius-md);
         overflow: hidden;
         border: 1px solid var(--hd-border);
-        background: var(--hd-bg);
+        background: #fff;
         box-shadow: var(--shadow-md);
       }
 
@@ -4167,6 +4147,7 @@ class HomeDeliveryPanel extends HTMLElement {
         width: 100%;
         height: 100%;
         object-fit: contain;
+        object-position: center;
         background: #fff;
       }
 
@@ -4324,9 +4305,10 @@ class HomeDeliveryPanel extends HTMLElement {
       }
 
       .mail-other-card .mail-preview img {
-        max-height: 140px;
-        object-fit: contain;
-        background: var(--hd-bg);
+        height: clamp(112px, 22vw, 168px);
+        max-height: clamp(112px, 22vw, 168px);
+        object-fit: cover;
+        background: #fff;
       }
 
       .mail-other-error {
@@ -4630,7 +4612,7 @@ class HomeDeliveryPanel extends HTMLElement {
 
       .label-header {
         display: grid;
-        grid-template-columns: 108px 1fr 64px;
+        grid-template-columns: 108px 1fr;
         min-height: 70px;
         border-bottom: 2px solid var(--label-ink);
       }
@@ -4638,7 +4620,7 @@ class HomeDeliveryPanel extends HTMLElement {
       .carrier-logo {
         display: grid;
         place-items: center;
-        padding: 8px;
+        padding: 10px 8px;
         border-right: 2px solid var(--label-ink);
         background: #fff;
         min-width: 0;
@@ -4646,15 +4628,26 @@ class HomeDeliveryPanel extends HTMLElement {
 
       .carrier-logo-img {
         display: block;
-        width: 100%;
-        max-width: 92px;
-        max-height: 48px;
+        width: auto;
+        height: auto;
+        max-width: 88px;
+        max-height: 44px;
         object-fit: contain;
       }
 
       .carrier-logo-img.carrier-logo-ups {
-        max-width: 42px;
-        max-height: 50px;
+        max-width: 36px;
+        max-height: 44px;
+      }
+
+      .carrier-logo-img.carrier-logo-fedex {
+        max-width: 72px;
+        max-height: 36px;
+      }
+
+      .carrier-logo-img.carrier-logo-estes {
+        max-width: 80px;
+        max-height: 40px;
       }
 
       .carrier-logo-text {
@@ -4690,28 +4683,12 @@ class HomeDeliveryPanel extends HTMLElement {
         text-transform: uppercase;
       }
 
-      .route-code {
-        display: grid;
-        place-items: center;
-        border-left: 2px solid var(--label-ink);
-        font-family: Arial Black, Arial, sans-serif;
-        font-size: 22px;
-        font-weight: 900;
-        line-height: 1;
-        text-align: center;
-        padding: 6px;
-        word-break: break-all;
-      }
-
       .label-meta {
-        display: grid;
-        grid-template-columns: 1fr 104px;
         border-bottom: 2px solid var(--label-ink);
       }
 
       .tracking-summary {
         padding: 10px 12px;
-        border-right: 2px solid var(--label-ink);
         min-width: 0;
       }
 
@@ -4730,27 +4707,6 @@ class HomeDeliveryPanel extends HTMLElement {
         font-weight: 900;
         letter-spacing: 0.02em;
         word-break: break-all;
-      }
-
-      .package-class {
-        display: grid;
-        place-items: center;
-        padding: 8px;
-        text-align: center;
-      }
-
-      .package-class strong {
-        font-size: 12px;
-        text-transform: uppercase;
-      }
-
-      .package-class span {
-        margin-top: 3px;
-        color: var(--label-muted);
-        font-size: 8px;
-        font-weight: 800;
-        letter-spacing: 0.08em;
-        text-transform: uppercase;
       }
 
       .address-section {
@@ -4840,40 +4796,6 @@ class HomeDeliveryPanel extends HTMLElement {
       .delivery-status.error .status-dot {
         background: #9e2b2b;
         box-shadow: 0 0 0 3px rgba(158, 43, 43, 0.18);
-      }
-
-      .barcode-section {
-        padding: 11px 14px 9px;
-        border-bottom: 2px solid var(--label-ink);
-      }
-
-      .barcode {
-        height: 64px;
-        margin-top: 4px;
-        background:
-          repeating-linear-gradient(
-            90deg,
-            #000 0 2px,
-            transparent 2px 4px,
-            #000 4px 5px,
-            transparent 5px 7px,
-            #000 7px 11px,
-            transparent 11px 13px,
-            #000 13px 14px,
-            transparent 14px 18px,
-            #000 18px 21px,
-            transparent 21px 24px
-          );
-      }
-
-      .barcode-number {
-        margin-top: 5px;
-        font-family: "Courier New", ui-monospace, monospace;
-        font-size: 10px;
-        font-weight: 900;
-        letter-spacing: 0.12em;
-        text-align: center;
-        word-break: break-all;
       }
 
       .tracking-event {

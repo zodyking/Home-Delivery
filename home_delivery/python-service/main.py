@@ -259,7 +259,7 @@ async def add_package(pkg: PackageCreate):
         scrape_result = await fetch_carrier_tracking(carrier, normalized)
         tracking_url = get_tracking_url(carrier, normalized)
     else:
-        # Auto-detect carrier via scrape-first probe
+        # Auto-detect carrier via HTTP/browser link probe
         probe_result = await probe_carrier_result(normalized)
 
         if probe_result.get("error"):
@@ -270,16 +270,8 @@ async def add_package(pkg: PackageCreate):
 
         carrier = probe_result["carrier"]
         tracking_url = probe_result["tracking_url"]
-        scrape_result = {
-            "status": probe_result.get("status"),
-            "status_detail": probe_result.get("status_detail"),
-            "events": probe_result.get("events") or [],
-            "out_for_delivery": probe_result.get("out_for_delivery", False),
-            "delivered": probe_result.get("delivered", False),
-            "last_polled": probe_result.get("last_polled"),
-            "last_event_fingerprint": probe_result.get("last_event_fingerprint"),
-            "error": None,
-        }
+        # Always scrape on add — format probe is instant; data comes from fetch.
+        scrape_result = await fetch_carrier_tracking(carrier, normalized)
 
     # Build package with scraped data
     from datetime import timedelta

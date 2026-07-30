@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 48" role="img" aria-label="FedEx">
+  <title>FedEx</title>
+  <rect width="160" height="48" fill="#fff"/>
+  <text x="8" y="33" font-family="Arial Black, Arial, Helvetica, sans-serif" font-size="28" font-weight="900" letter-spacing="-1.2">
+    <tspan fill="#4D148C">Fed</tspan><tspan fill="#FF6600">Ex</tspan>
+  </text>
+</svg>

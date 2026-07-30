@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from data_config import MAIL_IMAGES_DIR, WWW_DIR
+from mail.image_enhance import PREVIEW_MAX_SIZE, enhance_mail_preview, prepare_preview_bytes
 
 logger = logging.getLogger(__name__)
 
@@ -723,8 +724,6 @@ async def _save_history_letter_images(
 ) -> list[dict[str, Any]]:
     """Save letter images for a history day and OCR from/to parties."""
     from mail.letter_ocr import parse_letter_parties
-    from PIL import Image
-    from io import BytesIO
 
     letters: list[dict[str, Any]] = []
     safe_key = re.sub(r"[^a-zA-Z0-9]", "", str(account_key))[:12] or "mail"
@@ -743,11 +742,10 @@ async def _save_history_letter_images(
             continue
         try:
             parties = parse_letter_parties(img_bytes)
-            img = Image.open(BytesIO(img_bytes)).convert("RGB")
-            img.thumbnail((724, 320), Image.Resampling.LANCZOS)
+            preview_bytes = prepare_preview_bytes(img_bytes)
             filename = f"{prefix}{index}_{uuid.uuid4().hex[:6]}.jpg"
             output_path = MAIL_IMAGES_DIR / filename
-            img.save(output_path, format="JPEG", quality=88, optimize=True)
+            output_path.write_bytes(preview_bytes)
             letters.append({
                 "image": filename,
                 "account_id": account_key,
@@ -973,20 +971,16 @@ async def _save_mail_previews(
     if not real_images:
         return [], None
 
-    from PIL import Image
-    from io import BytesIO
-
     preview_images: list[str] = []
     safe_key = re.sub(r"[^a-zA-Z0-9]", "", str(account_key))[:12] or "mail"
     batch = uuid.uuid4().hex[:8]
 
     for index, img_bytes in enumerate(real_images):
         try:
-            img = Image.open(BytesIO(img_bytes)).convert("RGB")
-            img.thumbnail((724, 320), Image.Resampling.LANCZOS)
+            preview_bytes = prepare_preview_bytes(img_bytes)
             filename = f"mail_{safe_key}_{batch}_{index}.jpg"
             output_path = MAIL_IMAGES_DIR / filename
-            img.save(output_path, format="JPEG", quality=88, optimize=True)
+            output_path.write_bytes(preview_bytes)
             preview_images.append(filename)
         except Exception as exc:
             logger.warning("Failed to save mail preview %s: %s", index, exc)
@@ -1011,7 +1005,7 @@ async def _generate_mail_gif(images: list[bytes]) -> str | None:
         from io import BytesIO
 
         frames = []
-        target_size = (724, 320)
+        target_size = PREVIEW_MAX_SIZE
 
         for img_bytes in images:
             if not img_bytes:
@@ -1019,10 +1013,8 @@ async def _generate_mail_gif(images: list[bytes]) -> str | None:
                 img = Image.new("RGB", target_size, color=(200, 200, 200))
             else:
                 try:
-                    img = Image.open(BytesIO(img_bytes))
-                    img = img.convert("RGB")
-
-                    # Resize to fit within target while maintaining aspect ratio
+                    img = Image.open(BytesIO(img_bytes)).convert("RGB")
+                    img = enhance_mail_preview(img)
                     img.thumbnail(target_size, Image.Resampling.LANCZOS)
 
                     # Center on target-sized canvas
