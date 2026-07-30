@@ -124,7 +124,40 @@ def _has_missing_mailpiece_placeholder(msg: Message) -> bool:
 def _normalize_folder(folder: str | None) -> str:
     """Return a usable IMAP mailbox name."""
     cleaned = (folder or "").strip()
+    if cleaned.startswith('"') and cleaned.endswith('"') and len(cleaned) >= 2:
+        cleaned = cleaned[1:-1].replace('\\"', '"').replace("\\\\", "\\")
     return cleaned or "INBOX"
+
+
+# Characters that force IMAP quoting (RFC 3501 atom-specials + space).
+_IMAP_QUOTE_CHARS = frozenset(' (){%*"\\]')
+
+
+def _needs_imap_quote(name: str) -> bool:
+    return any(ch in _IMAP_QUOTE_CHARS or ch.isspace() for ch in name)
+
+
+def _quote_imap_mailbox(name: str) -> str:
+    """
+    Quote a mailbox name for SELECT/EXAMINE when it is not a simple atom.
+
+    Recent Python imaplib versions pass mailbox names to the server without
+    quoting; Gmail rejects ``EXAMINE USPS 443 Linwood`` with BAD parse errors.
+    """
+    cleaned = (name or "").strip()
+    if not cleaned:
+        return "INBOX"
+    if cleaned.startswith('"') and cleaned.endswith('"') and len(cleaned) >= 2:
+        return cleaned
+    if not _needs_imap_quote(cleaned):
+        return cleaned
+    escaped = cleaned.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
+def _unquote_imap_string(value: str) -> str:
+    """Decode an IMAP quoted string from a LIST/LSUB response."""
+    return value.replace("\\\"", '"').replace("\\\\", "\\")
 
 
 def _parse_list_mailbox(line: bytes | str) -> str | None:
@@ -135,14 +168,19 @@ def _parse_list_mailbox(line: bytes | str) -> str | None:
         text = line
 
     # Typical: (\HasNoChildren) "/" "INBOX"
-    match = re.search(r'\)\s+"[^"]*"\s+(.+)$', text)
-    if not match:
-        return None
+    # Gmail labels: (\HasNoChildren) "/" "USPS 443 Linwood"
+    # The hierarchy delimiter is the first quoted string; mailbox is the last.
+    quoted = re.findall(r'"((?:\\.|[^"\\])*)"', text)
+    if quoted:
+        name = _unquote_imap_string(quoted[-1])
+        return name or None
 
-    name = match.group(1).strip()
-    if name.startswith('"') and name.endswith('"'):
-        name = name[1:-1]
-    return name.replace('\\"', '"') or None
+    # Unquoted mailbox (e.g. INBOX): *) "/" INBOX
+    match = re.search(r"\)\s+\S+\s+(\S+)\s*$", text)
+    if match:
+        return match.group(1) or None
+
+    return None
 
 
 def _sort_folders(folders: list[str]) -> list[str]:
@@ -212,7 +250,8 @@ def _select_mailbox(imap: imaplib.IMAP4_SSL, folder: str) -> str:
 
     last_error = "Unknown mailbox error"
     for candidate in candidates:
-        status, data = imap.select(candidate, readonly=True)
+        mailbox = _quote_imap_mailbox(candidate)
+        status, data = imap.select(mailbox, readonly=True)
         if status == "OK":
             if candidate != folder:
                 logger.warning(
