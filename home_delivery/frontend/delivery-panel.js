@@ -1649,7 +1649,7 @@ class HomeDeliveryPanel extends HTMLElement {
           <div class="mail-account-label">${this._esc(account.label || "Address")}</div>
           <div class="mail-account-email">${this._esc(account.imap_user || "")}</div>
           <div class="mail-account-meta">
-            <span>${account.piece_count || 0} pieces today</span>
+            <span>${this._formatMailCountSummary(this._getMailCounts(account))}</span>
             <span class="mail-account-dot">·</span>
             <span>${this._esc(account.folder || "INBOX")}</span>
           </div>
