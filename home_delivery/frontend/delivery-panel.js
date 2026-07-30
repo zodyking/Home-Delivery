@@ -2,7 +2,7 @@
  * Home Delivery Panel - Vanilla JS for HA custom panel / standalone Ingress
  * Design aligned with home-weather: topbar + gear settings, dashboard layout.
  */
-const PANEL_VERSION = "0.0.11";
+const PANEL_VERSION = "0.0.12";
 
 class HomeDeliveryPanel extends HTMLElement {
   constructor() {
@@ -756,14 +756,23 @@ class HomeDeliveryPanel extends HTMLElement {
       this._settings = JSON.parse(JSON.stringify(this._config));
       this._normalizeMailSettings(this._settings);
 
+      const packagesResp = await this._fetchApi("/api/packages");
+      this._packages = packagesResp.packages || [];
+
+      const discovered = (resp.results || []).reduce((n, r) => n + (r.discovered_packages || 0), 0);
       const failed = (resp.results || []).filter(r => !r.success);
       if (failed.length > 0) {
         this._showToast(failed[0].error || "Sync failed", { error: true });
       } else {
-        this._showToast(`Synced — ${this._formatMailCountSummary(this._getMailCounts(
+        const summary = this._formatMailCountSummary(this._getMailCounts(
           (mailResp.accounts || []).find((a) => a.id === accountId)
             || this._getHomeMailAccount(mailResp.accounts || [])
-        ))}`);
+        ));
+        this._showToast(
+          discovered > 0
+            ? `Synced — ${summary}; ${discovered} package${discovered === 1 ? "" : "s"} auto-discovered`
+            : `Synced — ${summary}`
+        );
       }
     } catch (err) {
       this._showToast(err.message, { error: true });
@@ -882,17 +891,37 @@ class HomeDeliveryPanel extends HTMLElement {
     this._render();
 
     try {
-      await this._addPackage({
-        tracking_number: wiz.tracking,
-        carrier: wiz.carrier,
-        recipient: wiz.recipient || "",
-        destination: destination,
-        destination_account_id: destinationAccountId,
-      });
+      if (wiz.existingPackageId) {
+        const resp = await this._fetchApi(`/api/packages/${wiz.existingPackageId}`, {
+          method: "PATCH",
+          body: JSON.stringify({
+            recipient: wiz.recipient || "",
+            destination: destination,
+            destination_account_id: destinationAccountId,
+            needs_details: false,
+            auto_discovered: true,
+          }),
+        });
+        const idx = this._packages.findIndex((p) => p.id === wiz.existingPackageId);
+        if (idx >= 0 && resp.package) {
+          this._packages[idx] = resp.package;
+        }
+        this._addPackageWizard = null;
+        this._render();
+        this._showToast("Package details saved");
+      } else {
+        await this._addPackage({
+          tracking_number: wiz.tracking,
+          carrier: wiz.carrier,
+          recipient: wiz.recipient || "",
+          destination: destination,
+          destination_account_id: destinationAccountId,
+        });
 
-      this._addPackageWizard = null;
-      this._render();
-      this._showToast("Package added");
+        this._addPackageWizard = null;
+        this._render();
+        this._showToast("Package added");
+      }
     } catch (err) {
       wiz.submitting = false;
       this._render();
@@ -1310,7 +1339,7 @@ class HomeDeliveryPanel extends HTMLElement {
             <div class="mail-hero-message">
               <svg viewBox="0 0 24 24" width="48" height="48" fill="currentColor" style="opacity:0.3"><path d="M20 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 4l-8 5-8-5V6l8 5 8-5v2z"/></svg>
               <p>No mail addresses configured</p>
-              <button class="btn btn-primary" data-action="configure-mail">Add Mail Address</button>
+              <button class="btn btn-ghost btn-sm" data-action="configure-mail">Add Mail Address</button>
             </div>
           </div>
         </article>
@@ -1349,7 +1378,14 @@ class HomeDeliveryPanel extends HTMLElement {
   }
 
   _renderPackagesSection() {
-    const active = this._packages.filter(p => !p.delivered);
+    const active = this._packages
+      .filter(p => !p.delivered)
+      .slice()
+      .sort((a, b) => {
+        const aNeeds = a.needs_details || (a.auto_discovered && (!a.recipient || !a.destination)) ? 1 : 0;
+        const bNeeds = b.needs_details || (b.auto_discovered && (!b.recipient || !b.destination)) ? 1 : 0;
+        return bNeeds - aNeeds;
+      });
 
     return `
       <article class="glass card packages-card">
@@ -1358,7 +1394,7 @@ class HomeDeliveryPanel extends HTMLElement {
             <div class="card-title">Active Packages</div>
             <div class="card-sub">${active.length} tracking</div>
           </div>
-          <button class="btn btn-primary btn-sm" data-action="add-package">+ Add Package</button>
+          <button class="btn btn-ghost btn-sm" data-action="add-package">+ Add Package</button>
         </div>
         <div class="packages-body">
           ${active.length === 0 ? `
@@ -1400,15 +1436,22 @@ class HomeDeliveryPanel extends HTMLElement {
 
   _renderPackageCard(pkg) {
     const isRefreshing = this._refreshingPackage === pkg.id;
+    const needsDetails = !!pkg.needs_details || (!!pkg.auto_discovered && (!pkg.recipient || !pkg.destination));
     return `
-      <div class="package-card ${this._statusClass(pkg)} carrier-${this._carrierClass(pkg.carrier)}" data-package-id="${pkg.id}">
+      <div class="package-card ${this._statusClass(pkg)} carrier-${this._carrierClass(pkg.carrier)}${needsDetails ? " needs-details" : ""}" data-package-id="${pkg.id}">
         <div class="package-header">
           ${this._carrierBadge(pkg.carrier)}
           <span class="package-status">${this._esc(pkg.status || "Pending")}</span>
+          ${needsDetails ? `
+            <span class="discover-badge" title="Found in USPS Informed Delivery — add who it's for and where">
+              <span class="discover-ping" aria-hidden="true"></span>
+              Auto discovered
+            </span>
+          ` : ""}
         </div>
         <div class="package-tracking">${this._esc(pkg.tracking_number)}</div>
-        ${pkg.recipient ? `<div class="package-meta">For: ${this._esc(pkg.recipient)}</div>` : ""}
-        ${pkg.destination ? `<div class="package-meta">To: ${this._esc(pkg.destination)}</div>` : ""}
+        ${pkg.recipient ? `<div class="package-meta">For: ${this._esc(pkg.recipient)}</div>` : (needsDetails ? `<div class="package-meta muted">For: not set</div>` : "")}
+        ${pkg.destination ? `<div class="package-meta">To: ${this._esc(pkg.destination)}</div>` : (needsDetails ? `<div class="package-meta muted">To: not set</div>` : "")}
         ${pkg.status_detail ? `<div class="package-detail-text">${this._esc(pkg.status_detail)}</div>` : ""}
         ${pkg.events?.length > 0 ? `
           <div class="package-latest">
@@ -1418,6 +1461,11 @@ class HomeDeliveryPanel extends HTMLElement {
         ` : ""}
         ${pkg.error ? `<div class="package-error">${this._esc(pkg.error)}</div>` : ""}
         <div class="package-actions">
+          ${needsDetails ? `
+            <button class="btn btn-sm btn-discover" data-action="complete-details" data-id="${pkg.id}">
+              Complete details
+            </button>
+          ` : ""}
           <button class="btn btn-sm" data-action="refresh" data-id="${pkg.id}" ${isRefreshing ? "disabled" : ""}>
             ${isRefreshing ? "..." : "Refresh"}
           </button>
@@ -1668,16 +1716,14 @@ class HomeDeliveryPanel extends HTMLElement {
                 ${accounts.map(a => this._renderMailAccountCard(a)).join("")}
               </div>
             `}
-            <button type="button" class="btn mail-add-btn" data-action="add-mail-account">
-              <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/></svg>
-              Add Address
-            </button>
-          </div>
-          <div class="mail-sync-footer">
-            <button type="button" class="btn btn-primary btn-full" data-action="sync-mail" ${this._mailSyncing ? "disabled" : ""}>
-              ${this._mailSyncing ? "Syncing..." : "Sync"}
-            </button>
-            <p class="hint">Fetch inbox now and verify IMAP credentials</p>
+            <div class="settings-secondary-menu" role="toolbar" aria-label="Mail actions">
+              <button type="button" class="btn-link" data-action="add-mail-account">+ Add Address</button>
+              <span class="settings-secondary-sep" aria-hidden="true">·</span>
+              <button type="button" class="btn-link" data-action="sync-mail" ${this._mailSyncing ? "disabled" : ""}>
+                ${this._mailSyncing ? "Syncing…" : "Sync inbox"}
+              </button>
+            </div>
+            <p class="hint settings-secondary-hint">Fetch inbox now and verify IMAP credentials</p>
           </div>
         </div>
       </section>
@@ -1708,8 +1754,11 @@ class HomeDeliveryPanel extends HTMLElement {
             <input type="checkbox" data-action="toggle-mail-account" data-id="${account.id}" ${account.enabled !== false ? "checked" : ""} />
             <span class="toggle-slider"></span>
           </label>
-          <button type="button" class="btn btn-sm" data-action="edit-mail-account" data-id="${account.id}">Edit</button>
-          <button type="button" class="btn btn-sm btn-danger" data-action="delete-mail-account" data-id="${account.id}">Remove</button>
+          <div class="secondary-actions">
+            <button type="button" class="btn-link" data-action="edit-mail-account" data-id="${account.id}">Edit</button>
+            <span class="settings-secondary-sep" aria-hidden="true">·</span>
+            <button type="button" class="btn-link btn-link-danger" data-action="delete-mail-account" data-id="${account.id}">Remove</button>
+          </div>
         </div>
       </div>
     `;
@@ -1916,7 +1965,7 @@ class HomeDeliveryPanel extends HTMLElement {
       <div class="modal-backdrop" data-action="close-wizard">
         <div class="modal wizard-modal" onclick="event.stopPropagation()">
           <div class="modal-header">
-            <h2>Add Package</h2>
+            <h2>${wiz.completingDetails ? "Complete Package Details" : "Add Package"}</h2>
             <button class="close-btn" data-action="close-wizard">&times;</button>
           </div>
           <div class="wizard-progress">
@@ -1988,20 +2037,26 @@ class HomeDeliveryPanel extends HTMLElement {
   _renderWizardStep2(wiz) {
     return `
       <div class="wizard-step-content">
+        ${wiz.completingDetails ? `
+          <p class="hint">Auto-discovered from USPS Informed Delivery — tell us who it's for and where it's going.</p>
+        ` : ""}
         <div class="form-group">
           <label for="wizard-recipient">Who is this package for?</label>
           <input type="text" id="wizard-recipient"
             placeholder="e.g., Mom, John, Office"
             value="${this._esc(wiz.recipient || "")}" />
-          <p class="hint">Optional — used for announcements</p>
+          <p class="hint">${wiz.completingDetails ? "Required to finish setup" : "Optional — used for announcements"}</p>
         </div>
         <div class="wizard-carrier-summary">
           ${this._carrierBadge(wiz.carrier)}
           <span class="wizard-tracking-preview">${this._esc(wiz.tracking || "")}</span>
+          ${wiz.completingDetails ? `<span class="discover-badge compact"><span class="discover-ping" aria-hidden="true"></span>Auto discovered</span>` : ""}
         </div>
       </div>
       <div class="wizard-footer">
-        <button type="button" class="btn btn-ghost" data-action="wizard-back">Back</button>
+        ${wiz.completingDetails
+          ? `<button type="button" class="btn" data-action="close-wizard">Cancel</button>`
+          : `<button type="button" class="btn btn-ghost" data-action="wizard-back">Back</button>`}
         <button type="button" class="btn btn-primary" data-action="wizard-next">Next</button>
       </div>
     `;
@@ -2058,7 +2113,9 @@ class HomeDeliveryPanel extends HTMLElement {
       <div class="wizard-footer">
         <button type="button" class="btn btn-ghost" data-action="wizard-back">Back</button>
         <button type="button" class="btn btn-primary" data-action="wizard-submit" ${wiz.submitting ? "disabled" : ""}>
-          ${wiz.submitting ? "Adding..." : "Add Package"}
+          ${wiz.submitting
+            ? (wiz.completingDetails ? "Saving..." : "Adding...")
+            : (wiz.completingDetails ? "Save Details" : "Add Package")}
         </button>
       </div>
     `;
@@ -2183,6 +2240,27 @@ class HomeDeliveryPanel extends HTMLElement {
         this._selectedPackage = this._packages.find(p => p.id === data.id);
         this._render();
         break;
+      case "complete-details": {
+        const pkg = this._packages.find(p => p.id === data.id);
+        if (!pkg) break;
+        this._addPackageWizard = {
+          step: 2,
+          tracking: pkg.tracking_number || "",
+          carrier: pkg.carrier || null,
+          recipient: pkg.recipient || "",
+          destinationAccountId: pkg.destination_account_id || pkg.source_account_id || null,
+          destinationOther: pkg.destination || "",
+          destinationMode: (pkg.destination_account_id || pkg.source_account_id) ? "account" : (pkg.destination ? "other" : null),
+          probing: false,
+          probeError: null,
+          submitting: false,
+          existingPackageId: pkg.id,
+          completingDetails: true,
+        };
+        this._selectedPackage = null;
+        this._render();
+        break;
+      }
       case "close-detail":
         this._selectedPackage = null;
         this._render();
@@ -2375,6 +2453,21 @@ class HomeDeliveryPanel extends HTMLElement {
         min-width: clamp(34px, calc(var(--header-height, 64px) - 22px), 40px);
         height: clamp(34px, calc(var(--header-height, 64px) - 22px), 40px);
         min-height: clamp(34px, calc(var(--header-height, 64px) - 22px), 40px);
+        background: transparent;
+        border: none;
+        box-shadow: none;
+        border-radius: 0;
+        color: var(--hd-text);
+      }
+
+      .topbar .icon-btn:hover {
+        background: transparent;
+        color: var(--hd-text);
+        opacity: 0.75;
+      }
+
+      .topbar .icon-btn:disabled {
+        opacity: 0.4;
       }
 
       .topbar .icon-btn svg {
@@ -2457,10 +2550,10 @@ class HomeDeliveryPanel extends HTMLElement {
       }
 
       .title {
-        font-size: clamp(15px, 1.8vw, 18px);
+        font-size: clamp(16px, 1.9vw, 20px);
         line-height: 1.2;
-        font-weight: 600;
-        letter-spacing: -0.02em;
+        font-weight: 700;
+        letter-spacing: -0.01em;
         white-space: nowrap;
         overflow: hidden;
         text-overflow: ellipsis;
@@ -3097,27 +3190,27 @@ class HomeDeliveryPanel extends HTMLElement {
       .mail-accounts-list {
         display: flex;
         flex-direction: column;
-        gap: var(--space-3);
-        margin-bottom: var(--space-4);
+        gap: var(--space-2);
+        margin-bottom: 0;
       }
 
       .mail-account-card {
         display: flex;
-        align-items: flex-start;
+        align-items: center;
         justify-content: space-between;
         gap: var(--space-3);
-        padding: var(--space-3);
-        background: var(--hd-elevated);
+        padding: var(--space-2) var(--space-3);
+        background: transparent;
         border: 1px solid var(--hd-border);
-        border-radius: var(--radius-md);
+        border-radius: var(--radius-sm);
       }
 
       .mail-account-card.active {
-        border-color: var(--hd-accent);
+        border-color: var(--hd-border-strong);
       }
 
       .mail-account-card.disabled {
-        opacity: 0.65;
+        opacity: 0.55;
       }
 
       .mail-account-card.error {
@@ -3130,24 +3223,27 @@ class HomeDeliveryPanel extends HTMLElement {
       }
 
       .mail-account-label {
-        font-size: 15px;
+        font-size: 14px;
         font-weight: 600;
-        margin-bottom: 2px;
+        margin-bottom: 1px;
+        line-height: 1.25;
       }
 
       .mail-account-email {
-        font-size: 13px;
+        font-size: 12px;
         color: var(--hd-muted);
         word-break: break-all;
+        line-height: 1.3;
       }
 
       .mail-account-meta {
-        font-size: 12px;
+        font-size: 11px;
         color: var(--hd-muted);
-        margin-top: var(--space-2);
+        margin-top: 4px;
         display: flex;
         flex-wrap: wrap;
         gap: var(--space-1);
+        line-height: 1.3;
       }
 
       .mail-account-dot {
@@ -3155,35 +3251,78 @@ class HomeDeliveryPanel extends HTMLElement {
       }
 
       .mail-account-error {
-        font-size: 12px;
+        font-size: 11px;
         color: var(--hd-danger);
-        margin-top: var(--space-2);
+        margin-top: 4px;
       }
 
       .mail-account-actions {
         display: flex;
         flex-direction: column;
         align-items: flex-end;
-        gap: var(--space-2);
+        gap: 6px;
         flex-shrink: 0;
       }
 
-      .mail-add-btn {
-        width: 100%;
-        justify-content: center;
-        border-style: dashed;
+      .secondary-actions {
+        display: flex;
+        align-items: center;
+        gap: 6px;
       }
 
-      .mail-sync-footer {
-        padding: var(--space-4);
+      .settings-secondary-menu {
+        display: flex;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 6px;
+        margin-top: var(--space-3);
+        padding-top: var(--space-3);
         border-top: 1px solid var(--hd-border);
-        background: var(--hd-surface-2);
       }
 
-      .mail-sync-footer .hint {
-        text-align: center;
-        margin-top: var(--space-2);
-        margin-bottom: 0;
+      .settings-secondary-sep {
+        color: var(--hd-muted);
+        opacity: 0.55;
+        font-size: 12px;
+        user-select: none;
+      }
+
+      .settings-secondary-hint {
+        margin: 6px 0 0;
+        font-size: 11px;
+      }
+
+      .btn-link {
+        appearance: none;
+        background: none;
+        border: none;
+        padding: 0;
+        margin: 0;
+        font: inherit;
+        font-size: 12px;
+        font-weight: 500;
+        color: var(--hd-muted);
+        cursor: pointer;
+        text-decoration: none;
+        line-height: 1.2;
+      }
+
+      .btn-link:hover {
+        color: var(--hd-text);
+      }
+
+      .btn-link:disabled {
+        opacity: 0.45;
+        cursor: not-allowed;
+      }
+
+      .btn-link-danger {
+        color: var(--hd-danger);
+      }
+
+      .btn-link-danger:hover {
+        color: var(--hd-danger);
+        opacity: 0.85;
       }
 
       .btn-full {
@@ -3282,6 +3421,60 @@ class HomeDeliveryPanel extends HTMLElement {
 
       .package-card.error {
         border-color: var(--hd-danger);
+      }
+
+      .package-card.needs-details {
+        border-color: color-mix(in srgb, #e8a0a8 55%, var(--hd-border));
+        background:
+          linear-gradient(135deg, color-mix(in srgb, #e8a0a8 10%, transparent), transparent 42%),
+          var(--hd-elevated);
+      }
+
+      .discover-badge {
+        position: relative;
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        margin-left: auto;
+        padding: 3px 8px 3px 7px;
+        border-radius: 999px;
+        font-size: 10px;
+        font-weight: 650;
+        letter-spacing: 0.02em;
+        color: #8a3a44;
+        background: color-mix(in srgb, #e8a0a8 28%, var(--hd-elevated));
+        border: 1px solid color-mix(in srgb, #e8a0a8 55%, transparent);
+        white-space: nowrap;
+      }
+
+      .discover-badge.compact {
+        margin-left: 0;
+      }
+
+      .discover-ping {
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        background: #d96b78;
+        box-shadow: 0 0 0 0 color-mix(in srgb, #d96b78 55%, transparent);
+        animation: discover-ping 1.8s ease-out infinite;
+        flex-shrink: 0;
+      }
+
+      @keyframes discover-ping {
+        0% { box-shadow: 0 0 0 0 color-mix(in srgb, #d96b78 55%, transparent); }
+        70% { box-shadow: 0 0 0 7px transparent; }
+        100% { box-shadow: 0 0 0 0 transparent; }
+      }
+
+      .btn-discover {
+        color: #8a3a44;
+        border-color: color-mix(in srgb, #e8a0a8 65%, var(--hd-border));
+        background: color-mix(in srgb, #e8a0a8 18%, var(--hd-elevated));
+      }
+
+      .btn-discover:hover {
+        border-color: #d96b78;
       }
 
       .package-header {
@@ -3604,10 +3797,10 @@ class HomeDeliveryPanel extends HTMLElement {
       }
 
       .hd-menubar-title {
-        font-size: clamp(15px, 1.8vw, 18px);
+        font-size: clamp(16px, 1.9vw, 20px);
         line-height: 1.2;
-        font-weight: 600;
-        letter-spacing: -0.02em;
+        font-weight: 700;
+        letter-spacing: -0.01em;
         color: var(--hd-text);
         flex: 1;
       }
