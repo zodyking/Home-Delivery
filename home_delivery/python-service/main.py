@@ -327,7 +327,13 @@ async def update_package(package_id: str, updates: PackageUpdate):
     """Update package metadata."""
     update_dict = updates.model_dump(exclude_unset=True)
     # Completing auto-discovered packages clears the details prompt.
-    if update_dict.get("recipient") and update_dict.get("destination"):
+    recipient = (update_dict.get("recipient") or "").strip()
+    destination = (update_dict.get("destination") or "").strip()
+    if (
+        recipient
+        and destination
+        and recipient.lower() != "someone"
+    ):
         update_dict["needs_details"] = False
     result = await config_store.update_package(package_id, update_dict)
     if result is None:

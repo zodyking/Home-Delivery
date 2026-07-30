@@ -150,6 +150,8 @@ def _package_phrase(
     """Natural mid-sentence phrase, e.g. 'the UPS package for Mom'."""
     name = _format_carrier(carrier)
     recipient = (recipient or "").strip()
+    if recipient.lower() == "someone":
+        recipient = ""
     destination = _speak_address(destination)
 
     if recipient and destination:

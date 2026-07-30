@@ -13,6 +13,8 @@ from config_store import config_store
 
 logger = logging.getLogger(__name__)
 
+PLACEHOLDER_RECIPIENT = "Someone"
+
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -27,7 +29,8 @@ async def add_discovered_packages(
     Add Informed Delivery tracking numbers to the dashboard if missing.
 
     Packages are marked auto_discovered / needs_details so the UI can prompt
-    for recipient + destination.
+    for the real recipient. Destination is pre-filled from the Informed Delivery
+    mail account address; recipient uses PLACEHOLDER_RECIPIENT until confirmed.
     """
     if not tracking_numbers:
         return []
@@ -53,8 +56,8 @@ async def add_discovered_packages(
             "id": str(uuid.uuid4()),
             "tracking_number": normalized,
             "carrier": carrier,
-            "recipient": "",
-            "destination": "",
+            "recipient": PLACEHOLDER_RECIPIENT,
+            "destination": account_label,
             "destination_account_id": account_id,
             "tracking_url": get_tracking_url(carrier, normalized),
             "status": "Pending",

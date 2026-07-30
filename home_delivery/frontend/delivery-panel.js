@@ -1054,6 +1054,18 @@ class HomeDeliveryPanel extends HTMLElement {
   // Add Package Wizard Helpers
   // ============================================================================
 
+  _isPlaceholderRecipient(name) {
+    const value = (name || "").trim().toLowerCase();
+    return !value || value === "someone";
+  }
+
+  _needsPackageDetails(pkg) {
+    if (!pkg) return false;
+    if (pkg.needs_details) return true;
+    if (!pkg.auto_discovered) return false;
+    return this._isPlaceholderRecipient(pkg.recipient) || !(pkg.destination || "").trim();
+  }
+
   async _handleWizardNext() {
     const wiz = this._addPackageWizard;
     if (!wiz) return;
@@ -1082,6 +1094,16 @@ class HomeDeliveryPanel extends HTMLElement {
     } else if (wiz.step === 2) {
       const recipientInput = s.querySelector("#wizard-recipient");
       wiz.recipient = recipientInput?.value?.trim() || "";
+
+      if (wiz.completingDetails && (wiz.destinationAccountId || wiz.destinationOther)) {
+        if (this._isPlaceholderRecipient(wiz.recipient)) {
+          this._showToast("Please enter who this package is for", { error: true });
+          return;
+        }
+        await this._handleWizardSubmit();
+        return;
+      }
+
       wiz.step = 3;
       this._render();
     }
@@ -1135,6 +1157,25 @@ class HomeDeliveryPanel extends HTMLElement {
       return;
     }
 
+    if (wiz.completingDetails && this._isPlaceholderRecipient(wiz.recipient)) {
+      this._showToast("Please enter who this package is for", { error: true });
+      return;
+    }
+
+    if (!destination && !wiz.completingDetails) {
+      this._showToast("Please choose a destination", { error: true });
+      return;
+    }
+
+    if (!destination && wiz.completingDetails) {
+      destination = wiz.destinationOther || "";
+      if (wiz.destinationAccountId) {
+        const account = this._getMailAccount(wiz.destinationAccountId);
+        destination = account?.label || destination;
+        destinationAccountId = wiz.destinationAccountId;
+      }
+    }
+
     wiz.submitting = true;
     this._render();
 
@@ -1146,7 +1187,6 @@ class HomeDeliveryPanel extends HTMLElement {
             recipient: wiz.recipient || "",
             destination: destination,
             destination_account_id: destinationAccountId,
-            needs_details: false,
             auto_discovered: true,
           }),
         });
@@ -1770,8 +1810,8 @@ class HomeDeliveryPanel extends HTMLElement {
       const aDelivered = a.delivered ? 1 : 0;
       const bDelivered = b.delivered ? 1 : 0;
       if (aDelivered !== bDelivered) return aDelivered - bDelivered;
-      const aNeeds = a.needs_details || (a.auto_discovered && (!a.recipient || !a.destination)) ? 1 : 0;
-      const bNeeds = b.needs_details || (b.auto_discovered && (!b.recipient || !b.destination)) ? 1 : 0;
+      const aNeeds = this._needsPackageDetails(a) ? 1 : 0;
+      const bNeeds = this._needsPackageDetails(b) ? 1 : 0;
       return bNeeds - aNeeds;
     });
     const activeCount = packages.filter((p) => !p.delivered).length;
@@ -1815,8 +1855,9 @@ class HomeDeliveryPanel extends HTMLElement {
 
   _renderPackageCard(pkg) {
     const isRefreshing = this._refreshingPackage === pkg.id;
-    const needsDetails = !!pkg.needs_details || (!!pkg.auto_discovered && (!pkg.recipient || !pkg.destination));
+    const needsDetails = this._needsPackageDetails(pkg);
     const forName = (pkg.recipient || "").trim();
+    const showPlaceholderRecipient = this._isPlaceholderRecipient(forName);
     const statusLabel = this._packageStatusLabel(pkg);
     const statusClass = this._statusClass(pkg);
     const destination = (pkg.destination || "").trim();
@@ -1826,7 +1867,9 @@ class HomeDeliveryPanel extends HTMLElement {
     const meta = this._carrierMeta(pkg.carrier);
     const tracking = String(pkg.tracking_number || "");
     const addressLines = this._packageAddressLines(destination);
-    const recipientDisplay = forName || (needsDetails ? "Add recipient" : "Someone");
+    const recipientDisplay = showPlaceholderRecipient
+      ? (needsDetails ? "Add recipient" : "Someone")
+      : forName;
     const eventTitle = detail || statusLabel || "Status update";
     const eventCode = this._eventRegionCode(latest?.location);
     const eventCodeLabel = latest?.location ? "Origin Facility" : "Awaiting Scan";
@@ -1858,7 +1901,7 @@ class HomeDeliveryPanel extends HTMLElement {
           <section class="address-section">
             <div class="ship-to">Ship To</div>
             <div class="recipient">
-              <h3 class="recipient-name ${forName ? "" : "is-empty"}">${this._esc(recipientDisplay)}</h3>
+              <h3 class="recipient-name ${showPlaceholderRecipient ? "is-empty" : ""}">${this._esc(recipientDisplay)}</h3>
               <p class="recipient-address">
                 ${addressLines.map((line) => this._esc(line)).join("<br />")}
               </p>
@@ -1867,7 +1910,7 @@ class HomeDeliveryPanel extends HTMLElement {
                 <span>${this._esc(statusLabel)}</span>
               </div>
               ${needsDetails ? `
-                <div class="discover-badge compact" title="Found in USPS Informed Delivery — add who it's for and where">
+                <div class="discover-badge compact" title="Found in USPS Informed Delivery — add who it's for">
                   <span class="discover-ping" aria-hidden="true"></span>
                   Auto discovered
                 </div>
@@ -2796,7 +2839,7 @@ class HomeDeliveryPanel extends HTMLElement {
     return `
       <div class="wizard-step-content">
         ${wiz.completingDetails ? `
-          <p class="hint">Auto-discovered from USPS Informed Delivery — tell us who it's for and where it's going.</p>
+          <p class="hint">Auto-discovered from USPS Informed Delivery — tell us who it's for.</p>
         ` : ""}
         <div class="form-group">
           <label for="wizard-recipient">Who is this package for?</label>
@@ -3306,7 +3349,7 @@ class HomeDeliveryPanel extends HTMLElement {
           step: 2,
           tracking: pkg.tracking_number || "",
           carrier: pkg.carrier || null,
-          recipient: pkg.recipient || "",
+          recipient: this._isPlaceholderRecipient(pkg.recipient) ? "" : (pkg.recipient || ""),
           destinationAccountId: pkg.destination_account_id || pkg.source_account_id || null,
           destinationOther: pkg.destination || "",
           destinationMode: (pkg.destination_account_id || pkg.source_account_id) ? "account" : (pkg.destination ? "other" : null),
