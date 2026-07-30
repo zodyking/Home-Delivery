@@ -3,16 +3,19 @@ DOM parsers for carrier tracking pages (executed in-browser via Playwright).
 """
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 from typing import Any
 
 from playwright.async_api import Page
 
-# UPS: expand timeline then read shipProg_act_* nodes (see example MHTML).
+logger = logging.getLogger(__name__)
+
+# Parse every UPS Package History row after Show Details is open.
 UPS_PARSE_EVENTS_JS = """
 () => {
   const events = [];
-  for (let i = 0; i < 50; i++) {
+  for (let i = 0; i < 100; i++) {
     const dateEl = document.getElementById(`shipProg_act_Date${i}`);
     if (!dateEl) break;
 
@@ -46,32 +49,24 @@ UPS_PARSE_EVENTS_JS = """
 }
 """
 
-# UPS headline before timeline expands (new tracking UI).
 UPS_PARSE_SUMMARY_JS = """
 () => {
-  const deliveredBadge = document.body?.innerText?.match(/Delivered\\s+check_circle/i);
-  const statusLine = Array.from(document.querySelectorAll("p, span, div"))
+  const statusLine = Array.from(document.querySelectorAll("p, span, strong, div"))
     .map((el) => (el.innerText || "").trim())
     .find((text) => /^(Delivered|Out for Delivery|On the Way|Label Created|We Have Your Package)/i.test(text));
   const detailLine = Array.from(document.querySelectorAll("p, span, div"))
     .map((el) => (el.innerText || "").trim())
-    .find((text) => /Left at|Front Door|Mailbox|Delivered To/i.test(text));
+    .find((text) => /Left at|Front Door|Mailbox|Delivered To|Out For Delivery Today/i.test(text));
   return {
-    status: statusLine || (deliveredBadge ? "Delivered" : ""),
+    status: statusLine || "",
     detail: detailLine || "",
   };
 }
 """
 
-# USPS: tb-step timeline (see example MHTML).
+# Parse all USPS tb-step rows after history section is expanded.
 USPS_PARSE_EVENTS_JS = """
-async () => {
-  const link = document.querySelector("a.expand-collapse-history");
-  if (link && /show/i.test(link.textContent || "")) {
-    link.click();
-    await new Promise((resolve) => setTimeout(resolve, 900));
-  }
-
+() => {
   const events = [];
   document.querySelectorAll(".tb-step").forEach((step) => {
     if (step.querySelector(".expand-collapse-history")) return;
@@ -86,8 +81,29 @@ async () => {
       events.push({ date, description, location, status, detail });
     }
   });
-
   return events;
+}
+"""
+
+USPS_EXPAND_HISTORY_JS = """
+() => {
+  const anchors = Array.from(document.querySelectorAll("a"));
+  const historyLink =
+    anchors.find((a) => /see all tracking history/i.test(a.innerText || a.textContent || "")) ||
+    anchors.find((a) => /show tracking history/i.test(a.innerText || a.textContent || "")) ||
+    anchors.find(
+      (a) =>
+        a.classList.contains("expand-collapse-history") &&
+        /show|see all/i.test(a.innerText || a.textContent || ""),
+    );
+
+  if (!historyLink) return "none";
+
+  const text = (historyLink.innerText || historyLink.textContent || "").trim();
+  if (/hide tracking history/i.test(text)) return "already";
+
+  historyLink.click();
+  return "clicked";
 }
 """
 
@@ -143,18 +159,53 @@ def build_tracking_result(
     return result
 
 
-async def parse_ups_tracking(page: Page) -> dict[str, Any]:
-    """Expand UPS details drawer and parse shipment progress."""
-    show_details = page.get_by_role("button", name="Show Details")
-    if await show_details.count() == 0:
-        show_details = page.locator("button:has-text('Show Details')")
-
-    if await show_details.count() > 0:
+async def expand_ups_details(page: Page) -> None:
+    """Open UPS Package History (Show Details)."""
+    for locator in (
+        page.get_by_role("button", name="Show Details"),
+        page.locator("button:has-text('Show Details')"),
+    ):
+        if await locator.count() == 0:
+            continue
         try:
-            await show_details.first.click()
+            await locator.first.click()
             await page.wait_for_selector("#shipProg_act_Date0", timeout=15000)
-        except Exception:
-            pass
+            await page.wait_for_timeout(800)
+            logger.debug("UPS Show Details opened")
+            return
+        except Exception as exc:
+            logger.debug("UPS Show Details click failed: %s", exc)
+
+    # Already expanded if Hide Details is visible.
+    if await page.locator("button:has-text('Hide Details')").count() > 0:
+        await page.wait_for_selector("#shipProg_act_Date0", timeout=10000)
+        return
+
+
+async def expand_usps_history(page: Page) -> None:
+    """Open USPS full tracking history (See All Tracking History)."""
+    state = await page.evaluate(USPS_EXPAND_HISTORY_JS)
+    logger.debug("USPS history expand state: %s", state)
+
+    if state != "clicked":
+        return
+
+    await page.wait_for_timeout(2000)
+    try:
+        await page.wait_for_function(
+            """() => {
+                const steps = document.querySelectorAll('.tb-step');
+                return steps.length > 1 || document.querySelector('.tb-step .tb-status-detail');
+            }""",
+            timeout=10000,
+        )
+    except Exception:
+        pass
+
+
+async def parse_ups_tracking(page: Page) -> dict[str, Any]:
+    """Expand UPS details and parse full package history."""
+    await expand_ups_details(page)
 
     events = await page.evaluate(UPS_PARSE_EVENTS_JS)
     summary = await page.evaluate(UPS_PARSE_SUMMARY_JS)
@@ -168,11 +219,14 @@ async def parse_ups_tracking(page: Page) -> dict[str, Any]:
         status = summary.get("status", "")
         status_detail = summary.get("detail", "")
 
+    logger.info("UPS parsed %s history events", len(events))
     return build_tracking_result(events, status, status_detail)
 
 
 async def parse_usps_tracking(page: Page) -> dict[str, Any]:
-    """Expand USPS history and parse tb-step timeline."""
+    """Expand USPS history and parse every tb-step event."""
+    await expand_usps_history(page)
+
     events = await page.evaluate(USPS_PARSE_EVENTS_JS)
 
     status = ""
@@ -181,4 +235,5 @@ async def parse_usps_tracking(page: Page) -> dict[str, Any]:
         status = events[0].get("status") or events[0].get("description", "")
         status_detail = events[0].get("detail") or ""
 
+    logger.info("USPS parsed %s history events", len(events))
     return build_tracking_result(events, status, status_detail)
