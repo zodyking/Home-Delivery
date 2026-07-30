@@ -2,7 +2,7 @@
  * Home Delivery Panel - Vanilla JS for HA custom panel / standalone Ingress
  * Design aligned with home-weather: topbar + gear settings, dashboard layout.
  */
-const PANEL_VERSION = "0.0.2";
+const PANEL_VERSION = "0.0.3";
 
 class HomeDeliveryPanel extends HTMLElement {
   constructor() {
@@ -30,6 +30,7 @@ class HomeDeliveryPanel extends HTMLElement {
     this._refreshingAll = false;
     this._mailAccountModal = null;
     this._mailSyncing = false;
+    this._dashboardSettled = false;
   }
 
   get _isNarrow() {
@@ -84,14 +85,10 @@ class HomeDeliveryPanel extends HTMLElement {
     return match ? match[1] : "";
   }
 
+  /** True when running inside Home Assistant ingress iframe. */
   _isHaEmbedded() {
     const path = window.location.pathname || "";
     return /\/api\/hassio_ingress\//.test(path) || /\/api\/ingress\//.test(path);
-  }
-
-  /** Hide in-panel title/hamburger when HA already renders the app header (ingress mobile). */
-  _showPanelTopbar() {
-    return !(this._isHaEmbedded() && this._isNarrow);
   }
 
   _syncHaLayoutVars() {
@@ -161,6 +158,7 @@ class HomeDeliveryPanel extends HTMLElement {
       this._applyTheme();
 
       this._loading = false;
+      this._dashboardSettled = true;
       this._render();
     } catch (e) {
       console.error("Failed to load config:", e);
@@ -500,6 +498,11 @@ class HomeDeliveryPanel extends HTMLElement {
   // ============================================================================
   // Helpers
   // ============================================================================
+
+  _carrierClass(carrier) {
+    const slug = String(carrier || "unknown").toLowerCase().replace(/[^a-z0-9]/g, "");
+    return slug || "unknown";
+  }
 
   _carrierBadge(carrier) {
     const colors = {
@@ -938,18 +941,27 @@ class HomeDeliveryPanel extends HTMLElement {
 
   _renderTopbarActions() {
     return `
-      <button class="icon-btn" id="refresh-btn" aria-label="Refresh" ${this._refreshingAll ? "disabled" : ""}>
-        <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor" class="${this._refreshingAll ? "spinning" : ""}"><path d="M17.65 6.35A7.958 7.958 0 0012 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08A5.99 5.99 0 0112 18c-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/></svg>
-      </button>
-      <button class="icon-btn" id="gear-btn" aria-label="Settings">
-        <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 00.12-.61l-1.92-3.32a.488.488 0 00-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.484.484 0 00-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58a.49.49 0 00-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/></svg>
-      </button>
+      <div class="status-card">
+        <button class="icon-btn" id="refresh-btn" aria-label="Refresh" ${this._refreshingAll ? "disabled" : ""}>
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor" class="${this._refreshingAll ? "spinning" : ""}"><path d="M17.65 6.35A7.958 7.958 0 0012 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08A5.99 5.99 0 0112 18c-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/></svg>
+        </button>
+        <button class="icon-btn" id="gear-btn" aria-label="Settings">
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 00.12-.61l-1.92-3.32a.488.488 0 00-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.484.484 0 00-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58a.49.49 0 00-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/></svg>
+        </button>
+      </div>
     `;
   }
 
   _renderDashboardTopbar() {
-    if (!this._showPanelTopbar()) {
-      return `<div class="embedded-toolbar">${this._renderTopbarActions()}</div>`;
+    const embeddedNarrow = this._isHaEmbedded() && this._isNarrow;
+
+    if (embeddedNarrow) {
+      return `
+        <header class="topbar topbar--embedded-overlay" aria-label="Panel actions">
+          <div class="topbar-spacer" aria-hidden="true"></div>
+          ${this._renderTopbarActions()}
+        </header>
+      `;
     }
 
     return `
@@ -969,15 +981,17 @@ class HomeDeliveryPanel extends HTMLElement {
 
   _renderSettingsMenubar() {
     const backLabel = "Back";
-    if (!this._showPanelTopbar()) {
+    const embeddedNarrow = this._isHaEmbedded() && this._isNarrow;
+
+    if (embeddedNarrow) {
       return `
-        <div class="embedded-settings-bar">
-          <button type="button" class="hd-menubar-back" data-action="nav-back" aria-label="${backLabel}">
+        <header class="topbar topbar--embedded-overlay topbar--settings-overlay">
+          <button type="button" class="hd-menubar-back hd-menubar-back--compact" data-action="nav-back" aria-label="${backLabel}">
             <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z"/></svg>
-            <span>${backLabel}</span>
           </button>
+          <div class="topbar-spacer" aria-hidden="true"></div>
           <span class="settings-save-status" id="settings-save-status" role="status" aria-live="polite" data-state="${this._saveStatus}">${this._saveStatusText}</span>
-        </div>
+        </header>
       `;
     }
 
@@ -1020,12 +1034,40 @@ class HomeDeliveryPanel extends HTMLElement {
   }
 
   _renderDashboard() {
+    const settled = this._dashboardSettled ? " dashboard--settled" : "";
     return `
-      <section class="dashboard">
+      <section class="dashboard${settled}">
         ${this._renderMailHero()}
-        ${this._renderPackagesSection()}
-        ${this._renderDeliveredSection()}
+        ${this._renderStatsStrip()}
+        <div class="dashboard-bento">
+          ${this._renderPackagesSection()}
+          ${this._renderDeliveredSection()}
+        </div>
       </section>
+    `;
+  }
+
+  _renderStatsStrip() {
+    const mail = this._mailState || {};
+    const active = this._packages.filter(p => !p.delivered);
+    const delivered = this._packages.filter(p => p.delivered);
+    const mailCount = mail.configured ? (mail.piece_count ?? 0) : "—";
+
+    return `
+      <div class="stats-strip" role="list" aria-label="Delivery overview">
+        <article class="stat-glass" role="listitem">
+          <div class="stat-glass-value">${mailCount}</div>
+          <div class="stat-glass-label">Mail today</div>
+        </article>
+        <article class="stat-glass" role="listitem">
+          <div class="stat-glass-value">${active.length}</div>
+          <div class="stat-glass-label">Active packages</div>
+        </article>
+        <article class="stat-glass" role="listitem">
+          <div class="stat-glass-value">${delivered.length}</div>
+          <div class="stat-glass-label">Delivered</div>
+        </article>
+      </div>
     `;
   }
 
@@ -1037,11 +1079,14 @@ class HomeDeliveryPanel extends HTMLElement {
 
     if (!configured) {
       return `
-        <article class="glass card mail-hero-card">
-          <div class="mail-hero-message">
-            <svg viewBox="0 0 24 24" width="48" height="48" fill="currentColor" style="opacity:0.3"><path d="M20 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 4l-8 5-8-5V6l8 5 8-5v2z"/></svg>
-            <p>No mail addresses configured</p>
-            <button class="btn btn-primary" data-action="configure-mail">Add Mail Address</button>
+        <article class="glass card mail-hero-card mail-hero-card--empty">
+          <div class="mail-hero-bg" aria-hidden="true"></div>
+          <div class="mail-hero-inner">
+            <div class="mail-hero-message">
+              <svg viewBox="0 0 24 24" width="48" height="48" fill="currentColor" style="opacity:0.3"><path d="M20 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 4l-8 5-8-5V6l8 5 8-5v2z"/></svg>
+              <p>No mail addresses configured</p>
+              <button class="btn btn-primary" data-action="configure-mail">Add Mail Address</button>
+            </div>
           </div>
         </article>
       `;
@@ -1055,26 +1100,34 @@ class HomeDeliveryPanel extends HTMLElement {
 
     return `
       <article class="glass card mail-hero-card">
-        <div class="card-head">
-          <div>
-            <div class="card-title">Mail Today</div>
-            <div class="card-sub">${this._esc(subLabel)}</div>
-          </div>
-          <button class="btn btn-sm" data-action="refresh-mail">Check Now</button>
-        </div>
-        <div class="mail-hero-body">
-          <div class="mail-hero-main">
-            <div class="mail-count-large">${mail.piece_count || 0}</div>
-            <div class="mail-count-label">pieces arriving</div>
-          </div>
-          ${mail.gif_url ? `
-            <div class="mail-preview">
-              <img src="${this._getApiBase()}${mail.gif_url}" alt="Mail Preview" />
+        <div class="mail-hero-bg" aria-hidden="true"></div>
+        <div class="mail-hero-inner">
+          <div class="card-head mail-hero-head">
+            <div>
+              <div class="mail-hero-eyebrow">Informed Delivery</div>
+              <div class="card-title">Mail Today</div>
+              <div class="card-sub">${this._esc(subLabel)}</div>
             </div>
-          ` : ""}
+            <button class="btn btn-sm btn-ghost" data-action="refresh-mail">Check Now</button>
+          </div>
+          <div class="mail-hero-stage">
+            <div class="mail-hero-main">
+              <div class="mail-count-large">${mail.piece_count || 0}</div>
+              <div class="mail-count-label">pieces arriving</div>
+            </div>
+            ${mail.gif_url ? `
+              <div class="mail-preview">
+                <img src="${this._getApiBase()}${mail.gif_url}" alt="Mail Preview" loading="lazy" />
+              </div>
+            ` : `
+              <div class="mail-preview mail-preview--placeholder" aria-hidden="true">
+                <svg viewBox="0 0 24 24" width="56" height="56" fill="currentColor"><path d="M20 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 4l-8 5-8-5V6l8 5 8-5v2z"/></svg>
+              </div>
+            `}
+          </div>
+          ${lastCheckStr ? `<div class="mail-meta">Last checked: ${lastCheckStr}</div>` : ""}
+          ${!enabled ? `<div class="mail-meta mail-meta-warn">All addresses are disabled — enable one in Settings</div>` : ""}
         </div>
-        ${lastCheckStr ? `<div class="mail-meta">Last checked: ${lastCheckStr}</div>` : ""}
-        ${!enabled ? `<div class="mail-meta mail-meta-warn">All addresses are disabled — enable one in Settings</div>` : ""}
       </article>
     `;
   }
@@ -1132,7 +1185,7 @@ class HomeDeliveryPanel extends HTMLElement {
   _renderPackageCard(pkg) {
     const isRefreshing = this._refreshingPackage === pkg.id;
     return `
-      <div class="package-card ${this._statusClass(pkg)}" data-package-id="${pkg.id}">
+      <div class="package-card ${this._statusClass(pkg)} carrier-${this._carrierClass(pkg.carrier)}" data-package-id="${pkg.id}">
         <div class="package-header">
           ${this._carrierBadge(pkg.carrier)}
           <span class="package-status">${this._esc(pkg.status || "Pending")}</span>
@@ -2002,6 +2055,20 @@ class HomeDeliveryPanel extends HTMLElement {
         overflow: auto;
       }
 
+      .hud-wrapper.ha-embedded.narrow {
+        margin-top: calc(-1 * var(--header-height, 64px));
+        min-height: calc(100% + var(--header-height, 64px));
+      }
+
+      .hud-wrapper.ha-embedded.narrow .content-area {
+        padding-top: var(--space-2);
+      }
+
+      .settings-view.ha-embedded.narrow {
+        margin-top: calc(-1 * var(--header-height, 64px));
+        min-height: calc(100% + var(--header-height, 64px));
+      }
+
       .hud-wrapper::before,
       .hud-wrapper::after {
         content: none;
@@ -2015,6 +2082,7 @@ class HomeDeliveryPanel extends HTMLElement {
         height: 100%;
         min-height: 0;
         min-width: 0;
+        position: relative;
       }
 
       /* ======================== Topbar ======================== */
@@ -2039,10 +2107,71 @@ class HomeDeliveryPanel extends HTMLElement {
 
       .topbar .icon-btn {
         flex-shrink: 0;
-        width: 40px;
-        min-width: 40px;
-        height: 40px;
-        min-height: 40px;
+        width: clamp(34px, calc(var(--header-height, 64px) - 22px), 40px);
+        min-width: clamp(34px, calc(var(--header-height, 64px) - 22px), 40px);
+        height: clamp(34px, calc(var(--header-height, 64px) - 22px), 40px);
+        min-height: clamp(34px, calc(var(--header-height, 64px) - 22px), 40px);
+      }
+
+      .topbar .icon-btn svg {
+        width: clamp(18px, 4.5vw, 20px);
+        height: clamp(18px, 4.5vw, 20px);
+      }
+
+      .status-card {
+        display: flex;
+        align-items: center;
+        gap: var(--space-2);
+        justify-content: flex-end;
+        padding: 0;
+        flex-shrink: 0;
+        flex-wrap: nowrap;
+        min-width: 0;
+        margin-left: auto;
+        background: transparent;
+        border: none;
+        box-shadow: none;
+        border-radius: 0;
+      }
+
+      .topbar-spacer {
+        flex: 1;
+        min-width: 0;
+      }
+
+      .topbar--embedded-overlay {
+        background: transparent;
+        border-bottom: none;
+        z-index: 110;
+      }
+
+      .topbar--settings-overlay {
+        gap: var(--space-2);
+      }
+
+      .topbar--settings-overlay .settings-save-status {
+        flex-shrink: 1;
+        min-width: 0;
+        max-width: 42vw;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .hd-menubar-back--compact {
+        flex-shrink: 0;
+        width: clamp(34px, calc(var(--header-height, 64px) - 22px), 40px);
+        height: clamp(34px, calc(var(--header-height, 64px) - 22px), 40px);
+        min-width: clamp(34px, calc(var(--header-height, 64px) - 22px), 40px);
+        padding: 0;
+        justify-content: center;
+        border: 1px solid var(--hd-border-strong);
+        background: var(--hd-input-bg);
+        border-radius: var(--radius-sm);
+      }
+
+      .hd-menubar-back--compact span {
+        display: none;
       }
 
       .title-card {
@@ -2075,22 +2204,9 @@ class HomeDeliveryPanel extends HTMLElement {
         font-family: inherit;
       }
 
-      .embedded-toolbar {
-        display: flex;
-        align-items: center;
-        justify-content: flex-end;
-        gap: var(--space-2);
-        padding: var(--space-2) calc(var(--space-3) + var(--safe-right)) var(--space-2) calc(var(--space-3) + var(--safe-left));
-        background: transparent;
-      }
-
+      .embedded-toolbar,
       .embedded-settings-bar {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        gap: var(--space-3);
-        padding: var(--space-2) calc(var(--space-4) + var(--safe-right)) var(--space-2) calc(var(--space-4) + var(--safe-left));
-        background: transparent;
+        display: none;
       }
 
       .icon-btn {
@@ -2165,7 +2281,117 @@ class HomeDeliveryPanel extends HTMLElement {
       .dashboard {
         display: flex;
         flex-direction: column;
-        gap: var(--space-4);
+        gap: var(--space-3);
+        min-width: 0;
+        min-height: 0;
+        flex: 1;
+      }
+
+      .dashboard-bento {
+        display: grid;
+        gap: var(--space-3);
+        min-width: 0;
+      }
+
+      @media (min-width: 960px) {
+        .dashboard-bento {
+          grid-template-columns: minmax(0, 1.35fr) minmax(0, 0.65fr);
+          align-items: start;
+        }
+
+        .dashboard-bento .packages-card {
+          grid-column: 1;
+        }
+
+        .dashboard-bento .delivered-card {
+          grid-column: 2;
+        }
+
+        .dashboard-bento .packages-card:only-child {
+          grid-column: 1 / -1;
+        }
+      }
+
+      @media (prefers-reduced-motion: no-preference) {
+        .dashboard:not(.dashboard--settled) > * {
+          animation: cardIn 0.45s var(--ease) both;
+        }
+
+        .dashboard:not(.dashboard--settled) > *:nth-child(1) { animation-delay: 0s; }
+        .dashboard:not(.dashboard--settled) > *:nth-child(2) { animation-delay: 0.06s; }
+        .dashboard:not(.dashboard--settled) > *:nth-child(3) { animation-delay: 0.12s; }
+      }
+
+      @keyframes cardIn {
+        from { opacity: 0; transform: translateY(12px); }
+        to { opacity: 1; transform: translateY(0); }
+      }
+
+      .stats-strip {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: var(--space-3);
+        min-width: 0;
+      }
+
+      .stat-glass {
+        background: var(--hd-surface);
+        border: 1px solid var(--hd-border-strong);
+        border-radius: var(--radius-lg);
+        padding: var(--space-3) var(--space-4);
+        box-shadow: var(--shadow-sm);
+        min-width: 0;
+        transition: border-color var(--dur-fast) var(--ease), transform var(--dur-fast) var(--ease);
+      }
+
+      .stat-glass:hover {
+        border-color: var(--hd-accent);
+        transform: translateY(-1px);
+      }
+
+      .stat-glass-value {
+        font-size: clamp(22px, 5vw, 28px);
+        font-weight: 700;
+        letter-spacing: -0.04em;
+        font-variant-numeric: tabular-nums;
+        color: var(--hd-text);
+        line-height: 1.1;
+      }
+
+      .stat-glass-label {
+        margin-top: var(--space-1);
+        font-size: 11px;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+        color: var(--hd-muted);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      @media (max-width: 420px) {
+        .stats-strip {
+          gap: var(--space-2);
+        }
+
+        .stat-glass {
+          padding: var(--space-2) var(--space-3);
+        }
+
+        .stat-glass-label {
+          font-size: 10px;
+        }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        .dashboard:not(.dashboard--settled) > * {
+          animation: none;
+        }
+
+        .stat-glass:hover,
+        .package-card:hover {
+          transform: none;
+        }
       }
 
       /* ======================== Glass Cards ======================== */
@@ -2209,7 +2435,64 @@ class HomeDeliveryPanel extends HTMLElement {
       /* ======================== Mail Hero ======================== */
 
       .mail-hero-card {
-        min-height: 160px;
+        position: relative;
+        overflow: hidden;
+        padding: 0;
+        min-height: clamp(200px, 42vw, 280px);
+      }
+
+      .mail-hero-card--empty .mail-hero-inner {
+        min-height: clamp(180px, 36vw, 220px);
+      }
+
+      .mail-hero-bg {
+        position: absolute;
+        inset: 0;
+        pointer-events: none;
+        background:
+          radial-gradient(ellipse 85% 70% at 12% 100%, var(--hd-accent-dim) 0%, transparent 58%),
+          radial-gradient(ellipse 55% 45% at 92% 8%, rgba(255, 255, 255, 0.035) 0%, transparent 52%),
+          linear-gradient(165deg, var(--hd-surface) 0%, var(--hd-surface-2) 100%);
+      }
+
+      .mail-hero-inner {
+        position: relative;
+        z-index: 1;
+        padding: var(--space-4);
+        display: flex;
+        flex-direction: column;
+        gap: var(--space-3);
+        min-height: inherit;
+      }
+
+      .mail-hero-head {
+        margin-bottom: 0;
+      }
+
+      .mail-hero-eyebrow {
+        font-size: 10px;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+        color: var(--hd-muted);
+        margin-bottom: 2px;
+      }
+
+      .mail-hero-stage {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        align-items: center;
+        gap: var(--space-4);
+        min-width: 0;
+      }
+
+      @media (max-width: 560px) {
+        .mail-hero-stage {
+          grid-template-columns: 1fr;
+        }
+
+        .mail-preview {
+          max-width: none;
+        }
       }
 
       .mail-hero-message {
@@ -2227,23 +2510,17 @@ class HomeDeliveryPanel extends HTMLElement {
         margin: 0;
       }
 
-      .mail-hero-body {
-        display: flex;
-        flex-wrap: wrap;
-        align-items: center;
-        gap: var(--space-5);
-      }
-
       .mail-hero-main {
-        flex: 1;
-        min-width: 140px;
+        min-width: 0;
       }
 
       .mail-count-large {
-        font-size: clamp(48px, 12vw, 72px);
+        font-size: clamp(56px, 16vw, 88px);
         font-weight: 700;
         color: var(--hd-accent);
-        line-height: 1;
+        line-height: 0.95;
+        letter-spacing: -0.06em;
+        font-variant-numeric: tabular-nums;
       }
 
       .mail-count-label {
@@ -2253,15 +2530,29 @@ class HomeDeliveryPanel extends HTMLElement {
       }
 
       .mail-preview {
-        flex: 1;
-        min-width: 200px;
-        max-width: 400px;
+        min-width: 0;
+        max-width: min(100%, 320px);
+        justify-self: end;
       }
 
       .mail-preview img {
         width: 100%;
         border-radius: var(--radius-md);
         border: 1px solid var(--hd-border);
+        box-shadow: var(--shadow-md);
+      }
+
+      .mail-preview--placeholder {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: clamp(120px, 28vw, 180px);
+        aspect-ratio: 724 / 320;
+        border-radius: var(--radius-md);
+        border: 1px dashed var(--hd-border-strong);
+        background: var(--hd-elevated);
+        color: var(--hd-muted);
+        opacity: 0.45;
       }
 
       .mail-meta {
@@ -2439,25 +2730,34 @@ class HomeDeliveryPanel extends HTMLElement {
 
       .package-grid {
         display: grid;
-        grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+        grid-template-columns: repeat(auto-fill, minmax(min(100%, 260px), 1fr));
         gap: var(--space-3);
       }
 
       .package-grid.delivered {
-        opacity: 0.7;
+        opacity: 0.85;
       }
 
       .package-card {
         background: var(--hd-elevated);
         border: 1px solid var(--hd-border);
+        border-top-width: 3px;
+        border-top-color: var(--hd-border-strong);
         border-radius: var(--radius-lg);
         padding: var(--space-3);
-        transition: border-color var(--dur-fast) var(--ease), box-shadow var(--dur-fast) var(--ease);
+        transition: border-color var(--dur-fast) var(--ease), box-shadow var(--dur-fast) var(--ease), transform var(--dur-fast) var(--ease);
       }
 
+      .package-card.carrier-usps { border-top-color: #004B87; }
+      .package-card.carrier-ups { border-top-color: #FFB500; }
+      .package-card.carrier-fedex { border-top-color: #4D148C; }
+
       .package-card:hover {
-        border-color: var(--hd-border-strong);
+        border-left-color: var(--hd-border-strong);
+        border-right-color: var(--hd-border-strong);
+        border-bottom-color: var(--hd-border-strong);
         box-shadow: var(--shadow-md);
+        transform: translateY(-2px);
       }
 
       .package-card.out-for-delivery {
