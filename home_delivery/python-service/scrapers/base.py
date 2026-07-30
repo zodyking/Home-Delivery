@@ -83,11 +83,20 @@ async def get_page(timeout_ms: int = 30000) -> AsyncGenerator[Page, None]:
             user_agent=(
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/131.0.0.0 Safari/537.36"
+                "Chrome/150.0.0.0 Safari/537.36"
             ),
             extra_http_headers={
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+                "Accept-Encoding": "gzip, deflate, br, zstd",
                 "Accept-Language": "en-US,en;q=0.9",
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Sec-Ch-Ua": '"Not;A=Brand";v="8", "Chromium";v="150", "Google Chrome";v="150"',
+                "Sec-Ch-Ua-Mobile": "?0",
+                "Sec-Ch-Ua-Platform": '"Windows"',
+                "Sec-Fetch-Dest": "document",
+                "Sec-Fetch-Mode": "navigate",
+                "Sec-Fetch-Site": "none",
+                "Sec-Fetch-User": "?1",
+                "Upgrade-Insecure-Requests": "1",
             },
             ignore_https_errors=True,
         )
@@ -100,7 +109,7 @@ async def get_page(timeout_ms: int = 30000) -> AsyncGenerator[Page, None]:
             Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
             Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
 
-            // Mimic Chrome runtime
+            // Mimic Chrome 150 runtime
             window.chrome = { runtime: {}, loadTimes: () => ({}) };
 
             // Override permissions query to appear normal
@@ -112,6 +121,32 @@ async def get_page(timeout_ms: int = 30000) -> AsyncGenerator[Page, None]:
                         : originalQuery(parameters)
                 );
             }
+
+            // Set userAgentData for Chrome Client Hints API
+            Object.defineProperty(navigator, 'userAgentData', {
+                get: () => ({
+                    brands: [
+                        { brand: 'Not;A=Brand', version: '8' },
+                        { brand: 'Chromium', version: '150' },
+                        { brand: 'Google Chrome', version: '150' },
+                    ],
+                    mobile: false,
+                    platform: 'Windows',
+                    getHighEntropyValues: () => Promise.resolve({
+                        architecture: 'x86',
+                        bitness: '64',
+                        fullVersionList: [
+                            { brand: 'Not;A=Brand', version: '8.0.0.0' },
+                            { brand: 'Chromium', version: '150.0.0.0' },
+                            { brand: 'Google Chrome', version: '150.0.0.0' },
+                        ],
+                        model: '',
+                        platform: 'Windows',
+                        platformVersion: '10.0.0',
+                        uaFullVersion: '150.0.0.0',
+                    }),
+                }),
+            });
 
             // Hide automation-related properties
             Object.defineProperty(navigator, 'plugins', {

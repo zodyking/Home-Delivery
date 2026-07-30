@@ -35,15 +35,24 @@ async def goto_tracking_page(page: Page, url: str, timeout_ms: int = 45000) -> N
     """
     Navigate to a carrier tracking URL with retries for flaky HTTP/2 responses.
 
-    Sets appropriate referer headers based on the carrier domain.
+    Sets appropriate referer and Sec-Fetch-Site headers based on the carrier domain.
     """
-    # Set referer based on carrier domain
+    # Set referer and Sec-Fetch-Site based on carrier domain
     if "usps.com" in url:
-        await page.set_extra_http_headers({"Referer": "https://www.usps.com/"})
+        await page.set_extra_http_headers({
+            "Referer": "https://www.usps.com/",
+            "Sec-Fetch-Site": "same-site",
+        })
     elif "ups.com" in url:
-        await page.set_extra_http_headers({"Referer": "https://www.ups.com/"})
+        await page.set_extra_http_headers({
+            "Referer": "https://www.ups.com/",
+            "Sec-Fetch-Site": "same-origin",
+        })
     elif "fedex.com" in url:
-        await page.set_extra_http_headers({"Referer": "https://www.fedex.com/"})
+        await page.set_extra_http_headers({
+            "Referer": "https://www.fedex.com/",
+            "Sec-Fetch-Site": "same-origin",
+        })
 
     last_error: Exception | None = None
 
