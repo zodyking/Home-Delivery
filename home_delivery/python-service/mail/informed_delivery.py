@@ -99,8 +99,21 @@ def _get_today_imap_date() -> str:
     return datetime.now().strftime("%d-%b-%Y")
 
 
-def _build_search_query(senders: list[str], subjects: list[str], since_date: str) -> str:
+def _build_search_query(
+    senders: list[str],
+    subjects: list[str],
+    since_date: str,
+    *,
+    ignore_sender: bool = False,
+) -> str:
     """Build IMAP search query for Informed Delivery."""
+    subject_clause = f'SUBJECT "{subjects[0]}"'
+    for subject in subjects[1:]:
+        subject_clause = f'(OR {subject_clause} SUBJECT "{subject}")'
+
+    if ignore_sender:
+        return f'({subject_clause} SINCE {since_date})'
+
     # OR together multiple senders
     if len(senders) == 1:
         from_clause = f'FROM "{senders[0]}"'
@@ -108,10 +121,6 @@ def _build_search_query(senders: list[str], subjects: list[str], since_date: str
         from_clause = f'FROM "{senders[0]}"'
         for sender in senders[1:]:
             from_clause = f'(OR {from_clause} FROM "{sender}")'
-
-    subject_clause = f'SUBJECT "{subjects[0]}"'
-    for subject in subjects[1:]:
-        subject_clause = f'(OR {subject_clause} SUBJECT "{subject}")'
 
     return f'({from_clause} {subject_clause} SINCE {since_date})'
 
@@ -693,8 +702,31 @@ def _connect_imap(mail_config: dict[str, Any]) -> tuple[imaplib.IMAP4_SSL, str]:
     return imap, selected
 
 
-def _imap_search(imap: imaplib.IMAP4_SSL, since_date: str) -> list[bytes]:
-    search_query = _build_search_query(USPS_SENDERS, INFORMED_DELIVERY_SUBJECTS, since_date)
+def _should_ignore_sender(mail_config: dict[str, Any]) -> bool:
+    """
+    Skip USPS FROM filter when digests are forwarded into a label/folder.
+
+    Explicit ignore_sender wins; otherwise non-INBOX folders default to True
+    so existing custom-folder accounts work without re-saving.
+    """
+    if "ignore_sender" in mail_config:
+        return bool(mail_config.get("ignore_sender"))
+    folder = _normalize_folder(mail_config.get("folder"))
+    return folder.upper() != "INBOX"
+
+
+def _imap_search(
+    imap: imaplib.IMAP4_SSL,
+    since_date: str,
+    *,
+    ignore_sender: bool = False,
+) -> list[bytes]:
+    search_query = _build_search_query(
+        USPS_SENDERS,
+        INFORMED_DELIVERY_SUBJECTS,
+        since_date,
+        ignore_sender=ignore_sender,
+    )
     try:
         status, data = imap.search("UTF-8", search_query)
     except Exception:
@@ -783,9 +815,20 @@ async def check_informed_delivery(mail_config: dict[str, Any]) -> dict[str, Any]
         logger.error(f"IMAP connection failed: {e}")
         raise
 
+    ignore_sender = _should_ignore_sender(mail_config)
+
     try:
-        email_ids = _imap_search(imap, _get_today_imap_date())
-        logger.debug("IMAP search in %s found %s message(s)", selected_folder, len(email_ids))
+        email_ids = _imap_search(
+            imap,
+            _get_today_imap_date(),
+            ignore_sender=ignore_sender,
+        )
+        logger.debug(
+            "IMAP search in %s found %s message(s) (ignore_sender=%s)",
+            selected_folder,
+            len(email_ids),
+            ignore_sender,
+        )
 
         if not email_ids:
             logger.info("No Informed Delivery email found for today")
@@ -891,9 +934,10 @@ async def fetch_informed_delivery_history(
     )
 
     imap: imaplib.IMAP4_SSL | None = None
+    ignore_sender = _should_ignore_sender(mail_config)
     try:
         imap, _selected = _connect_imap(mail_config)
-        email_ids = _imap_search(imap, since)
+        email_ids = _imap_search(imap, since, ignore_sender=ignore_sender)
         if not email_ids:
             return []
 

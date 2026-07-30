@@ -5,10 +5,12 @@ Respects quiet hours, per-type toggles, media-player skip/volume, and message pr
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime, time
 from typing import Any
 
 from config_store import config_store
+from tts_address import format_address_for_tts, format_location_for_tts
 from tts_engine import dispatch_tts
 
 logger = logging.getLogger(__name__)
@@ -83,8 +85,61 @@ def _format_carrier(carrier: str | None) -> str:
 
 
 def _format_status(status: str | None) -> str:
-    text = (status or "updated").strip()
-    return text.lower() if text else "updated"
+    """Normalize a single status fragment for TTS."""
+    text = re.sub(r"\s+", " ", (status or "").strip().lower())
+    text = text.replace("_", " ")
+    text = re.sub(r"\bawaiting\b", "waiting", text)
+    return text
+
+
+_UNHELPFUL_STATUS = frozenset({"", "pending", "unknown", "updated", "status update"})
+
+
+def _status_fragment(text: str | None) -> str:
+    normalized = _format_status(text)
+    return "" if normalized in _UNHELPFUL_STATUS else normalized
+
+
+def _package_status_for_tts(package: dict[str, Any]) -> str:
+    """
+    Build a speakable combined status from detail + headline status + latest event.
+
+    UI often stores the milestone in status_detail (e.g. "Shipping Label Created")
+    and a carrier sub-status in status (e.g. "USPS Awaiting Item").
+    """
+    detail = _status_fragment(package.get("status_detail"))
+    headline = _status_fragment(package.get("status"))
+
+    events = package.get("events") or []
+    event_text = ""
+    if events and isinstance(events[0], dict):
+        ev = events[0]
+        event_text = _status_fragment(
+            ev.get("description") or ev.get("status") or ev.get("detail")
+        )
+
+    parts: list[str] = []
+    for candidate in (detail, headline, event_text):
+        if not candidate:
+            continue
+        if any(candidate in existing or existing in candidate for existing in parts):
+            continue
+        parts.append(candidate)
+
+    if not parts:
+        return "updated"
+
+    return " ".join(parts)
+
+
+def _speak_address(text: str | None) -> str:
+    """Format an address or destination label for clear TTS."""
+    return format_address_for_tts(text or "")
+
+
+def _speak_location(text: str | None) -> str:
+    """Format a tracking scan location as city and state for TTS."""
+    return format_location_for_tts(text or "")
 
 
 def _package_phrase(
@@ -95,7 +150,7 @@ def _package_phrase(
     """Natural mid-sentence phrase, e.g. 'the UPS package for Mom'."""
     name = _format_carrier(carrier)
     recipient = (recipient or "").strip()
-    destination = (destination or "").strip()
+    destination = _speak_address(destination)
 
     if recipient and destination:
         return f"the {name} package for {recipient}, going to {destination}"
@@ -125,26 +180,28 @@ def _build_package_message(
     if newly_ofd:
         return f"{phrase} is out for delivery."
 
+    status_text = _package_status_for_tts(package)
+
     if status_changed:
-        status = _format_status(package.get("status"))
         events = package.get("events", [])
         location = ""
-        if events:
+        if events and isinstance(events[0], dict):
             location = (events[0].get("location") or "").strip()
 
-        msg = f"{phrase} is now {status}."
-        if location:
-            msg += f" It was last seen in {location}."
+        msg = f"{phrase}. Package status is now {status_text}."
+        spoken_loc = _speak_location(location)
+        if spoken_loc:
+            msg += f" Last seen in {spoken_loc}."
         return msg
 
-    return f"{phrase} is {_format_status(package.get('status'))}."
+    return f"{phrase}. Package status is now {status_text}."
 
 
 def _account_label(account: dict[str, Any]) -> str:
     """Human-readable address name for TTS."""
     label = (account.get("label") or "").strip()
     if label:
-        return label
+        return _speak_address(label)
     user = (account.get("imap_user") or "").strip()
     if user:
         return user.split("@")[0]

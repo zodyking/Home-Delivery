@@ -297,7 +297,7 @@ async def wait_for_ups_tracking(
             pass
 
         await dismiss_ups_overlays(page)
-        await page.wait_for_timeout(750)
+        await page.wait_for_timeout(350)
 
     selectors = (
         "#shipProg_act_Date0",
@@ -409,7 +409,7 @@ async def prepare_estes_tracking_page(page: Page, tracking_number: str) -> None:
 
     if clicked:
         logger.info("Estes Search submitted for %s", pro)
-        await page.wait_for_timeout(400)
+        await page.wait_for_timeout(200)
 
 
 async def wait_for_estes_tracking(page: Page, timeout_ms: int = 25000) -> str:

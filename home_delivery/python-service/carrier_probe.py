@@ -190,17 +190,12 @@ async def _probe_usps_browser(page, tracking_number: str) -> bool:
 
 
 async def _probe_ups_browser(page, tracking_number: str) -> bool:
-    from scrapers.navigation import (
-        dismiss_ups_overlays,
-        wait_for_ups_tracking,
-        warmup_ups_session,
-    )
+    from scrapers.navigation import dismiss_ups_overlays, wait_for_ups_tracking
 
     url = get_tracking_url("ups", tracking_number)
     logger.debug("Probing UPS link: %s", url)
 
     try:
-        await warmup_ups_session(page)
         await goto_tracking_page(page, url, timeout_ms=PROBE_TIMEOUT_MS)
         await dismiss_ups_overlays(page)
 

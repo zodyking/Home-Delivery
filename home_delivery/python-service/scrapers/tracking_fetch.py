@@ -26,7 +26,6 @@ from .navigation import (
     wait_for_estes_tracking,
     wait_for_ups_tracking,
     wait_for_usps_tracking,
-    warmup_ups_session,
 )
 from .parsers import parse_estes_tracking, parse_ups_tracking, parse_usps_tracking
 
@@ -70,13 +69,11 @@ async def _fetch_usps(page, tracking_number: str) -> dict[str, Any]:
 
 async def _fetch_ups(page, tracking_number: str) -> dict[str, Any]:
     """Fetch UPS tracking data from a ready page."""
-    await warmup_ups_session(page)
-
     url = get_tracking_url("ups", tracking_number)
-    await goto_tracking_page(page, url, timeout_ms=60000)
+    await goto_tracking_page(page, url, timeout_ms=45000)
     await dismiss_ups_overlays(page)
 
-    if not await wait_for_ups_tracking(page, tracking_number, timeout_ms=60000):
+    if not await wait_for_ups_tracking(page, tracking_number, timeout_ms=45000):
         return {"error": "UPS tracking content not found"}
 
     return await parse_ups_tracking(page)

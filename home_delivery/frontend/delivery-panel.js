@@ -751,6 +751,14 @@ class HomeDeliveryPanel extends HTMLElement {
     return slug || "unknown";
   }
 
+  _wizardCarrierOptions() {
+    return [
+      { id: "estes", label: "Estes Express" },
+      { id: "ups", label: "UPS" },
+      { id: "usps", label: "USPS" },
+    ];
+  }
+
   _carrierMeta(carrier) {
     const key = this._carrierClass(carrier);
     const catalog = {
@@ -999,42 +1007,23 @@ class HomeDeliveryPanel extends HTMLElement {
 
     if (wiz.step === 1) {
       const trackingInput = s.querySelector("#wizard-tracking");
+      const carrierSelect = s.querySelector("#wizard-carrier");
       const tracking = trackingInput?.value?.trim();
+      const carrier = carrierSelect?.value?.trim();
 
       if (!tracking) {
         this._showToast("Please enter a tracking number", { error: true });
         return;
       }
-
-      wiz.tracking = tracking;
-
-      // If we already have a carrier, move to next step
-      if (wiz.carrier) {
-        wiz.step = 2;
-        this._render();
+      if (!carrier) {
+        this._showToast("Please select a carrier", { error: true });
         return;
       }
 
-      // Probe for carrier
-      wiz.probing = true;
-      wiz.probeError = null;
+      wiz.tracking = tracking;
+      wiz.carrier = carrier;
+      wiz.step = 2;
       this._render();
-
-      try {
-        const resp = await this._fetchApi("/api/packages/probe-carrier", {
-          method: "POST",
-          body: JSON.stringify({ tracking_number: tracking }),
-        });
-
-        wiz.carrier = resp.carrier;
-        wiz.probing = false;
-        wiz.step = 2;
-        this._render();
-      } catch (err) {
-        wiz.probing = false;
-        wiz.probeError = err.message || "Could not detect carrier";
-        this._render();
-      }
     } else if (wiz.step === 2) {
       const recipientInput = s.querySelector("#wizard-recipient");
       wiz.recipient = recipientInput?.value?.trim() || "";
@@ -1152,6 +1141,12 @@ class HomeDeliveryPanel extends HTMLElement {
       }
     } else if (step === 2) {
       modal.folder = s.querySelector("#mail-imap-folder")?.value?.trim() || modal.folder || "INBOX";
+      const ignoreEl = s.querySelector("#mail-ignore-sender");
+      if (ignoreEl) {
+        modal.ignoreSender = ignoreEl.checked;
+      } else if (this._isInboxFolder(modal.folder)) {
+        modal.ignoreSender = false;
+      }
     } else if (step === 3) {
       modal.label = s.querySelector("#mail-label")?.value?.trim() || modal.label;
     }
@@ -1205,6 +1200,7 @@ class HomeDeliveryPanel extends HTMLElement {
           ? modal.folder
           : resp.default_folder;
         modal.folder = preferred || "INBOX";
+        modal.ignoreSender = !this._isInboxFolder(modal.folder);
         modal.testing = false;
         modal.step = 2;
         this._render();
@@ -1215,6 +1211,11 @@ class HomeDeliveryPanel extends HTMLElement {
       }
     } else if (modal.step === 2) {
       this._syncMailWizardFromForm(2);
+      if (this._isInboxFolder(modal.folder)) {
+        modal.ignoreSender = false;
+      } else if (modal.ignoreSender === undefined) {
+        modal.ignoreSender = true;
+      }
       modal.step = 3;
       this._render();
     }
@@ -1257,6 +1258,7 @@ class HomeDeliveryPanel extends HTMLElement {
             imap_host: modal.imapHost,
             imap_port: modal.imapPort || 993,
             folder: modal.folder || "INBOX",
+            ignore_sender: !!modal.ignoreSender,
             imap_user: modal.imapUser,
           };
           if (modal.imapPassword && modal.imapPassword !== "********") {
@@ -1277,6 +1279,7 @@ class HomeDeliveryPanel extends HTMLElement {
           imap_user: modal.imapUser,
           imap_password: modal.imapPassword,
           folder: modal.folder || "INBOX",
+          ignore_sender: !!modal.ignoreSender,
           piece_count: 0,
           last_check: null,
           gif_filename: null,
@@ -1463,39 +1466,11 @@ class HomeDeliveryPanel extends HTMLElement {
     return `
       <section class="dashboard${settled}">
         ${this._renderMailHero()}
-        ${this._renderStatsStrip()}
         ${this._renderOtherMailSection()}
         <div class="dashboard-bento">
           ${this._renderPackagesSection()}
         </div>
       </section>
-    `;
-  }
-
-  _renderStatsStrip() {
-    const mail = this._mailState || {};
-    const accounts = mail.accounts || [];
-    const home = this._getHomeMailAccount(accounts);
-    const active = this._packages.filter(p => !p.delivered);
-    const mailCounts = this._getMailCounts(home);
-    const inboundCount = home ? mailCounts.packages : (mail.configured ? 0 : "—");
-    const mailpieceCount = home ? mailCounts.mailpieces : (mail.configured ? 0 : "—");
-
-    return `
-      <div class="stats-strip" role="list" aria-label="Delivery overview">
-        <article class="stat-glass" role="listitem">
-          <div class="stat-glass-value">${mailpieceCount}</div>
-          <div class="stat-glass-label">Mailpieces</div>
-        </article>
-        <article class="stat-glass" role="listitem">
-          <div class="stat-glass-value">${inboundCount}</div>
-          <div class="stat-glass-label">Inbound packages</div>
-        </article>
-        <article class="stat-glass" role="listitem">
-          <div class="stat-glass-value">${active.length}</div>
-          <div class="stat-glass-label">Active tracking</div>
-        </article>
-      </div>
     `;
   }
 
@@ -2588,6 +2563,8 @@ class HomeDeliveryPanel extends HTMLElement {
   _renderMailWizardStep2(modal) {
     const folders = modal.folders || [];
     const selectedFolder = modal.folder || "INBOX";
+    const isInbox = this._isInboxFolder(selectedFolder);
+    const ignoreSender = modal.ignoreSender ?? !isInbox;
 
     return `
       <div class="wizard-step-content">
@@ -2605,6 +2582,15 @@ class HomeDeliveryPanel extends HTMLElement {
           </select>
           <p class="hint">Choose where USPS Informed Delivery emails arrive (usually INBOX)</p>
         </div>
+        ${isInbox ? "" : `
+        <div class="form-group mail-forward-option">
+          <label class="checkbox-label" for="mail-ignore-sender">
+            <input type="checkbox" id="mail-ignore-sender" ${ignoreSender ? "checked" : ""} />
+            <span>Include forwarded digests</span>
+          </label>
+          <p class="hint">Forwarded emails come from someone else, not USPS. Enable this to find digests by subject only.</p>
+        </div>
+        `}
       </div>
       <div class="wizard-footer">
         <button type="button" class="btn btn-ghost" data-action="mail-wizard-back">Back</button>
@@ -2640,6 +2626,12 @@ class HomeDeliveryPanel extends HTMLElement {
             <span class="wizard-summary-label">Folder</span>
             <span>${this._esc(modal.folder || "INBOX")}</span>
           </div>
+          ${modal.ignoreSender ? `
+          <div class="wizard-summary-row">
+            <span class="wizard-summary-label">Forwarded digests</span>
+            <span>Included</span>
+          </div>
+          ` : ""}
           <div class="wizard-summary-row">
             <span class="wizard-summary-label">Server</span>
             <span>${this._esc(modal.imapHost || "")}:${modal.imapPort || 993}</span>
@@ -2657,6 +2649,7 @@ class HomeDeliveryPanel extends HTMLElement {
 
   _initMailAccountWizard(mode, account = null) {
     if (mode === "edit" && account) {
+      const folder = account.folder || "INBOX";
       return {
         mode: "edit",
         id: account.id,
@@ -2666,7 +2659,8 @@ class HomeDeliveryPanel extends HTMLElement {
         imapUser: account.imap_user || "",
         imapPassword: account.imap_password ? "********" : "",
         folders: [],
-        folder: account.folder || "INBOX",
+        folder,
+        ignoreSender: account.ignore_sender ?? !this._isInboxFolder(folder),
         label: account.label || "",
         testing: false,
         testError: null,
@@ -2684,11 +2678,16 @@ class HomeDeliveryPanel extends HTMLElement {
       imapPassword: "",
       folders: [],
       folder: "INBOX",
+      ignoreSender: false,
       label: "",
       testing: false,
       testError: null,
       submitting: false,
     };
+  }
+
+  _isInboxFolder(folder) {
+    return String(folder || "INBOX").trim().toUpperCase() === "INBOX";
   }
 
   _renderAddPackageWizard() {
@@ -2730,41 +2729,38 @@ class HomeDeliveryPanel extends HTMLElement {
   }
 
   _renderWizardStep1(wiz) {
-    const probing = wiz.probing;
-    const probeError = wiz.probeError;
-    const carrier = wiz.carrier;
+    const selectedCarrier = wiz.carrier || "";
 
     return `
       <div class="wizard-step-content">
         <div class="form-group">
+          <label for="wizard-carrier">Carrier *</label>
+          <select id="wizard-carrier" required>
+            <option value="">Select carrier…</option>
+            ${this._wizardCarrierOptions().map((c) => `
+              <option value="${this._esc(c.id)}" ${selectedCarrier === c.id ? "selected" : ""}>
+                ${this._esc(c.label)}
+              </option>
+            `).join("")}
+          </select>
+        </div>
+        <div class="form-group">
           <label for="wizard-tracking">Tracking Number *</label>
           <input type="text" id="wizard-tracking" required
-            placeholder="e.g., 9400111899560438600329"
-            value="${this._esc(wiz.tracking || "")}"
-            ${probing ? "disabled" : ""} />
-          <p class="hint">We'll check Estes, UPS, FedEx, and USPS automatically</p>
+            placeholder="e.g., 1ZA92T380303849608 or 103-8067337"
+            value="${this._esc(wiz.tracking || "")}" />
+          <p class="hint">Pick the carrier first — tracking starts immediately when you add the package.</p>
         </div>
-        ${carrier ? `
+        ${selectedCarrier ? `
           <div class="wizard-carrier-result">
-            ${this._carrierBadge(carrier)}
-            <span class="wizard-carrier-text">Carrier detected</span>
-          </div>
-        ` : ""}
-        ${probeError ? `
-          <div class="wizard-error">${this._esc(probeError)}</div>
-        ` : ""}
-        ${probing ? `
-          <div class="wizard-probing">
-            <div class="spinner small"></div>
-            <span>Detecting carrier...</span>
+            ${this._carrierBadge(selectedCarrier)}
+            <span class="wizard-carrier-text">${this._esc(this._carrierMeta(selectedCarrier).shipperName)}</span>
           </div>
         ` : ""}
       </div>
       <div class="wizard-footer">
         <button type="button" class="btn" data-action="close-wizard">Cancel</button>
-        <button type="button" class="btn btn-primary" data-action="wizard-next" ${probing ? "disabled" : ""}>
-          ${carrier ? "Next" : "Detect Carrier"}
-        </button>
+        <button type="button" class="btn btn-primary" data-action="wizard-next">Next</button>
       </div>
     `;
   }
@@ -2898,6 +2894,21 @@ class HomeDeliveryPanel extends HTMLElement {
       form.addEventListener("change", onChange);
     }
 
+    // Wizard carrier select — preview badge while choosing
+    const carrierSelect = s.querySelector("#wizard-carrier");
+    if (carrierSelect) {
+      carrierSelect.addEventListener("change", () => {
+        if (this._addPackageWizard) {
+          const trackingInput = s.querySelector("#wizard-tracking");
+          if (trackingInput) {
+            this._addPackageWizard.tracking = trackingInput.value?.trim() || "";
+          }
+          this._addPackageWizard.carrier = carrierSelect.value || "";
+          this._render();
+        }
+      });
+    }
+
     // Wizard destination select handler
     const destSelect = s.querySelector("#wizard-destination-select");
     if (destSelect) {
@@ -2932,6 +2943,29 @@ class HomeDeliveryPanel extends HTMLElement {
 
     this._initMailCarousels();
     this._attachMailAddressAutocomplete();
+    this._attachMailWizardFolderListener();
+  }
+
+  _attachMailWizardFolderListener() {
+    const s = this.shadowRoot;
+    const modal = this._mailAccountModal;
+    if (!s || !modal || modal.step !== 2) return;
+
+    const folderSelect = s.querySelector("#mail-imap-folder");
+    if (!folderSelect || folderSelect.dataset.bound === "1") return;
+    folderSelect.dataset.bound = "1";
+
+    folderSelect.addEventListener("change", () => {
+      const previousFolder = modal.folder;
+      const folder = folderSelect.value?.trim() || "INBOX";
+      modal.folder = folder;
+      if (this._isInboxFolder(folder)) {
+        modal.ignoreSender = false;
+      } else if (this._isInboxFolder(previousFolder)) {
+        modal.ignoreSender = true;
+      }
+      this._render();
+    });
   }
 
   _attachMailAddressAutocomplete() {
@@ -3206,7 +3240,16 @@ class HomeDeliveryPanel extends HTMLElement {
   async _handleAction(e, action, data) {
     switch (action) {
       case "add-package":
-        this._addPackageWizard = { step: 1, tracking: "", carrier: null, recipient: "", destinationAccountId: null, destinationOther: "", destinationMode: null, probing: false, probeError: null, submitting: false };
+        this._addPackageWizard = {
+          step: 1,
+          tracking: "",
+          carrier: "",
+          recipient: "",
+          destinationAccountId: null,
+          destinationOther: "",
+          destinationMode: null,
+          submitting: false,
+        };
         this._render();
         break;
       case "close-wizard":
@@ -3702,68 +3745,11 @@ class HomeDeliveryPanel extends HTMLElement {
         to { opacity: 1; transform: translateY(0); }
       }
 
-      .stats-strip {
-        display: grid;
-        grid-template-columns: repeat(3, minmax(0, 1fr));
-        gap: var(--space-3);
-        min-width: 0;
-      }
-
-      .stat-glass {
-        background: var(--hd-surface);
-        border: 1px solid var(--hd-border-strong);
-        border-radius: var(--radius-lg);
-        padding: var(--space-3) var(--space-4);
-        box-shadow: var(--shadow-sm);
-        min-width: 0;
-        transition: border-color var(--dur-fast) var(--ease), transform var(--dur-fast) var(--ease);
-      }
-
-      .stat-glass:hover {
-        border-color: var(--hd-accent);
-        transform: translateY(-1px);
-      }
-
-      .stat-glass-value {
-        font-size: clamp(22px, 5vw, 28px);
-        font-weight: 700;
-        letter-spacing: -0.04em;
-        font-variant-numeric: tabular-nums;
-        color: var(--hd-text);
-        line-height: 1.1;
-      }
-
-      .stat-glass-label {
-        margin-top: var(--space-1);
-        font-size: 11px;
-        letter-spacing: 0.06em;
-        text-transform: uppercase;
-        color: var(--hd-muted);
-        white-space: nowrap;
-        overflow: hidden;
-        text-overflow: ellipsis;
-      }
-
-      @media (max-width: 420px) {
-        .stats-strip {
-          gap: var(--space-2);
-        }
-
-        .stat-glass {
-          padding: var(--space-2) var(--space-3);
-        }
-
-        .stat-glass-label {
-          font-size: 10px;
-        }
-      }
-
       @media (prefers-reduced-motion: reduce) {
         .dashboard:not(.dashboard--settled) > * {
           animation: none;
         }
 
-        .stat-glass:hover,
         .package-card:hover {
           transform: none;
         }
@@ -4114,12 +4100,12 @@ class HomeDeliveryPanel extends HTMLElement {
         width: 100%;
         height: clamp(200px, 38vw, 300px);
         max-height: clamp(200px, 38vw, 300px);
-        object-fit: cover;
+        object-fit: contain;
         object-position: center;
         border-radius: 0;
         border: none;
         box-shadow: none;
-        background: transparent;
+        background: #0d0d0f;
       }
 
       .mail-preview--placeholder {
@@ -4172,7 +4158,7 @@ class HomeDeliveryPanel extends HTMLElement {
         border-radius: 0;
         overflow: hidden;
         border: none;
-        background: transparent;
+        background: #0d0d0f;
         box-shadow: none;
       }
 
@@ -4199,9 +4185,9 @@ class HomeDeliveryPanel extends HTMLElement {
       .mail-carousel-slide img {
         width: 100%;
         height: 100%;
-        object-fit: cover;
+        object-fit: contain;
         object-position: center;
-        background: transparent;
+        background: #0d0d0f;
       }
 
       .mail-carousel-badge {
@@ -4360,8 +4346,8 @@ class HomeDeliveryPanel extends HTMLElement {
       .mail-other-card .mail-preview img {
         height: clamp(200px, 38vw, 300px);
         max-height: clamp(200px, 38vw, 300px);
-        object-fit: cover;
-        background: transparent;
+        object-fit: contain;
+        background: #0d0d0f;
         border: none;
         box-shadow: none;
         border-radius: 0;

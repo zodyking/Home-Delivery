@@ -93,6 +93,7 @@ def _migrate_mail_config(mail: dict[str, Any]) -> dict[str, Any]:
         "imap_user": user,
         "imap_password": mail.get("imap_password", ""),
         "folder": mail.get("folder", "INBOX"),
+        "ignore_sender": mail.get("ignore_sender", mail.get("folder", "INBOX").upper() != "INBOX"),
         "last_check": mail.get("last_check"),
         "piece_count": mail.get("piece_count", 0),
         "gif_filename": mail.get("gif_filename"),
