@@ -35,7 +35,7 @@ INFORMED_DELIVERY_SUBJECTS = [
 # Legacy alias
 DIGEST_SUBJECT = INFORMED_DELIVERY_SUBJECTS[0]
 
-# Images to filter out (not actual mail pieces)
+# Images to filter out (not actual mail pieces / ads / branding)
 FILTER_PATTERNS = [
     "mailerProvidedImage",
     "ra_0",
@@ -44,10 +44,44 @@ FILTER_PATTERNS = [
     "header",
     "footer",
     "banner",
+    "campaign",
+    "localxchange",
+    "local-xchange",
+    "local_xchange",
+    "smartlocker",
+    "smart-locker",
+    "advert",
+    "promo",
+    "marketing",
+]
+
+# Promotional / non-letter content markers in Informed Delivery HTML
+PROMO_HTML_PATTERNS = [
+    re.compile(r"campaign-from", re.IGNORECASE),
+    re.compile(r"Local\s*XChange", re.IGNORECASE),
+    re.compile(r"USPS\s+Smart\s+Lockers?", re.IGNORECASE),
+    re.compile(r"mailerProvidedImage", re.IGNORECASE),
+    re.compile(r"Learn more about your mail", re.IGNORECASE),
 ]
 
 # Placeholder image reference in HTML when no scan available
 NO_MAILPIECE_PATTERN = re.compile(r"\bimage-no-mailpieces?700\.jpg\b", re.IGNORECASE)
+
+# USPS Informed Delivery package tracking numbers (IMpb / similar)
+USPS_TRACKING_RE = re.compile(r"\b(9\d{19,25}|[A-Z]{2}\d{9}US)\b", re.IGNORECASE)
+UPS_TRACKING_RE = re.compile(r"\b(1Z[A-Z0-9]{16})\b", re.IGNORECASE)
+TRACKING_LABEL_RE = re.compile(
+    r"[?&](?:tLabels|qtc_tLabels|tracknum|trknbr)=([0-9A-Za-z]{10,34})",
+    re.IGNORECASE,
+)
+
+# HTML element IDs used by Informed Delivery digest package subsections
+PACKAGE_SECTION_COUNT_IDS = {
+    "expected_today": "today-package-item-number",
+    "expected_1_2_days": "onetwodays-package-item-number",
+    "awaiting_from_sender": "awaiting-package-item-number",
+    "outbound": "outbound-package-item-number",
+}
 
 
 def _get_today_imap_date() -> str:
@@ -118,20 +152,45 @@ def _append_unique_image(images: list[bytes], seen: set[int], payload: bytes | N
     images.append(payload)
 
 
+def _strip_promo_html_sections(html: str) -> str:
+    """Remove promotional Informed Delivery blocks (campaigns, Local XChange ads)."""
+    cleaned = html
+    # Drop tables/divs that look like campaign / marketing cards.
+    cleaned = re.sub(
+        r"(?is)<(table|tr|td|div)[^>]*(?:campaign-from|mailerProvidedImage|Local\s*XChange)[^>]*>.*?</\1>",
+        " ",
+        cleaned,
+    )
+    # Drop remaining promo marker lines.
+    for pattern in PROMO_HTML_PATTERNS:
+        if pattern.search(cleaned):
+            cleaned = pattern.sub(" ", cleaned)
+    return cleaned
+
+
+def _html_looks_like_promo_context(snippet: str) -> bool:
+    """Return True when surrounding HTML is promotional rather than a letter scan."""
+    return any(p.search(snippet) for p in PROMO_HTML_PATTERNS)
+
+
 def _extract_images_from_html(msg: Message, images: list[bytes], seen: set[int]) -> None:
-    """Pull embedded base64 images from the HTML body."""
+    """Pull embedded base64 images from the HTML body, skipping promo ads."""
     for part in msg.walk():
         if part.get_content_type() != "text/html":
             continue
         raw = part.get_payload(decode=True)
         if not raw:
             continue
-        text = raw.decode("utf-8", errors="ignore")
+        text = _strip_promo_html_sections(raw.decode("utf-8", errors="ignore"))
         for match in re.finditer(
             r"data:image/(?:jpeg|jpg|png);base64,([A-Za-z0-9+/=\s]+)",
             text,
             flags=re.IGNORECASE,
         ):
+            start = max(0, match.start() - 500)
+            end = min(len(text), match.end() + 500)
+            if _html_looks_like_promo_context(text[start:end]):
+                continue
             blob = match.group(1).replace("\n", "").replace("\r", "")
             try:
                 _append_unique_image(images, seen, base64.b64decode(blob, validate=False))
@@ -140,9 +199,10 @@ def _extract_images_from_html(msg: Message, images: list[bytes], seen: set[int])
 
 
 def _extract_images_from_message(msg: Message) -> list[bytes]:
-    """Extract mail piece images from email MIME parts and HTML embeds."""
+    """Extract real letter scan images from email MIME parts and HTML embeds."""
     images: list[bytes] = []
     seen: set[int] = set()
+    html = _get_message_html(msg)
 
     for part in msg.walk():
         content_type = part.get_content_type()
@@ -151,10 +211,29 @@ def _extract_images_from_message(msg: Message) -> list[bytes]:
 
         content_disposition = str(part.get("Content-Disposition", ""))
         filename = part.get_filename() or ""
+        content_id = str(part.get("Content-ID", "")).strip("<>")
 
-        # Skip obvious branding assets when a filename is present.
+        # Skip obvious branding / ad assets when a filename is present.
         if filename and not _is_valid_mail_image(filename):
             continue
+        if content_id and not _is_valid_mail_image(content_id):
+            # Content-IDs like campaign/logo should be skipped even without extension.
+            lower_cid = content_id.lower()
+            if any(p.lower() in lower_cid for p in FILTER_PATTERNS):
+                continue
+
+        # Skip MIME images referenced only from promotional HTML blocks.
+        if html and (filename or content_id):
+            for token in filter(None, [filename, content_id]):
+                for ref in re.finditer(re.escape(token), html, flags=re.IGNORECASE):
+                    snippet = html[max(0, ref.start() - 800) : ref.end() + 800]
+                    if _html_looks_like_promo_context(snippet):
+                        filename = "__promo__"
+                        break
+                if filename == "__promo__":
+                    break
+            if filename == "__promo__":
+                continue
 
         # Prefer attachments and inline scans; unnamed inline parts are often mail pieces.
         if filename or "inline" in content_disposition.lower() or "attachment" in content_disposition.lower():
@@ -196,42 +275,121 @@ def _html_to_text(html: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
-def _parse_delivery_counts(msg: Message) -> tuple[int | None, int | None]:
-    """
-    Parse mailpiece and inbound package counts from Informed Delivery email copy.
+def _element_inner_text(html: str, id_suffix: str) -> str | None:
+    """Return inner text for the first element whose id ends with id_suffix."""
+    pattern = re.compile(
+        rf'id="[^"]*{re.escape(id_suffix)}"[^>]*>(.*?)</(?:span|div|td|p|a)>',
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    match = pattern.search(html)
+    if not match:
+        return None
+    return re.sub(r"\s+", " ", _html_to_text(match.group(1))).strip()
 
-    Example: "You have 2 mailpiece(s) and 1 inbound package(s) arriving soon."
+
+def _parse_section_count(html: str, id_suffix: str) -> int | None:
+    """Parse an integer count from a digest section badge element."""
+    text = _element_inner_text(html, id_suffix)
+    if text is None:
+        return None
+    match = re.search(r"\d+", text)
+    return int(match.group(0)) if match else None
+
+
+def _packages_section_html(html: str) -> str:
+    """Return the PACKAGES section HTML when present."""
+    match = re.search(r'id="[^"]*packages-section"', html, flags=re.IGNORECASE)
+    if not match:
+        # Fallback: start at the PACKAGES heading text.
+        match = re.search(r">\s*PACKAGES\s*<", html, flags=re.IGNORECASE)
+        if not match:
+            return html
+    return html[match.start() :]
+
+
+def _extract_tracking_numbers_from_html(html: str) -> list[str]:
+    """Extract unique tracking numbers from Informed Delivery package links/text."""
+    found: list[str] = []
+    seen: set[str] = set()
+
+    def _add(raw: str) -> None:
+        cleaned = re.sub(r"[\s\-]", "", raw.strip().upper())
+        if not cleaned or cleaned in seen:
+            return
+        # Ignore short / non-tracking noise from Gmail chrome.
+        if len(cleaned) < 12:
+            return
+        seen.add(cleaned)
+        found.append(cleaned)
+
+    # Prefer explicit tracking URL params and USPS IMpb numbers.
+    for raw in TRACKING_LABEL_RE.findall(html):
+        _add(raw)
+    for raw in USPS_TRACKING_RE.findall(html):
+        _add(raw)
+
+    # UPS numbers only when tied to a UPS tracking URL (avoid random 1Z… in page chrome).
+    for match in re.finditer(
+        r"ups\.com/track[^\"'\s<>]*tracknum=([0-9A-Za-z]{10,34})",
+        html,
+        flags=re.IGNORECASE,
+    ):
+        _add(match.group(1))
+
+    return found
+
+
+def _count_campaign_items(html: str) -> int:
+    """Count promotional campaign cards (Local XChange, etc.)."""
+    return len(re.findall(r'id="[^"]*campaign-from-span-id"', html, flags=re.IGNORECASE))
+
+
+def _parse_delivery_digest(msg: Message) -> dict[str, Any]:
+    """
+    Parse Informed Delivery digest HTML.
+
+    Package count uses only the Expected Today subsection.
+    Tracking numbers are collected from the whole Packages section for auto-discovery.
     """
     html = _get_message_html(msg)
     if not html:
-        return None, None
+        return {
+            "mailpiece_count": None,
+            "package_count": None,
+            "section_counts": {},
+            "tracking_numbers": [],
+        }
 
-    text = _html_to_text(html)
+    packages_html = _packages_section_html(html)
+    section_counts: dict[str, int | None] = {}
+    for key, suffix in PACKAGE_SECTION_COUNT_IDS.items():
+        section_counts[key] = _parse_section_count(html, suffix)
 
-    combined = re.search(
-        r"you have\s+(\d+)\s*mail\s*pieces?(?:\(\s*s\s*\))?"
-        r"(?:\s+and\s+(\d+)\s*(?:inbound\s+)?packages?(?:\(\s*s\s*\))?)?",
-        text,
-        flags=re.IGNORECASE,
-    )
-    if combined:
-        mail_count = int(combined.group(1))
-        package_count = int(combined.group(2) or 0)
-        return mail_count, package_count
+    expected_today = section_counts.get("expected_today")
+    tracking_numbers = _extract_tracking_numbers_from_html(packages_html)
 
-    mail_match = re.search(r"(\d+)\s*mail\s*pieces?(?:\(\s*s\s*\))?", text, flags=re.IGNORECASE)
-    package_match = re.search(
-        r"(\d+)\s*(?:inbound\s+)?packages?(?:\(\s*s\s*\))?",
-        text,
-        flags=re.IGNORECASE,
-    )
-    if mail_match or package_match:
-        return (
-            int(mail_match.group(1)) if mail_match else 0,
-            int(package_match.group(1)) if package_match else 0,
+    # Mailpiece count: prefer total-mailpieces minus campaign ads.
+    mailpiece_count = _parse_section_count(html, "total-mailpieces")
+    campaign_count = _count_campaign_items(html)
+    if mailpiece_count is not None and campaign_count:
+        mailpiece_count = max(0, mailpiece_count - campaign_count)
+
+    if mailpiece_count is None:
+        text = _html_to_text(html)
+        combined = re.search(
+            r"you have\s+(\d+)\s*mail\s*pieces?(?:\(\s*s\s*\))?",
+            text,
+            flags=re.IGNORECASE,
         )
+        if combined:
+            mailpiece_count = max(0, int(combined.group(1)) - campaign_count)
 
-    return None, None
+    return {
+        "mailpiece_count": mailpiece_count,
+        "package_count": expected_today if expected_today is not None else 0,
+        "section_counts": section_counts,
+        "tracking_numbers": tracking_numbers,
+    }
 
 
 def _normalize_folder(folder: str | None) -> str:
@@ -439,6 +597,8 @@ async def check_informed_delivery(mail_config: dict[str, Any]) -> dict[str, Any]
                 "package_count": 0,
                 "gif_filename": None,
                 "preview_images": [],
+                "tracking_numbers": [],
+                "section_counts": {},
             }
 
         # Get the latest matching email
@@ -454,35 +614,37 @@ async def check_informed_delivery(mail_config: dict[str, Any]) -> dict[str, Any]
                 "package_count": 0,
                 "gif_filename": None,
                 "preview_images": [],
+                "tracking_numbers": [],
+                "section_counts": {},
             }
 
         raw_email = msg_data[0][1]
         msg = email.message_from_bytes(raw_email)
 
-        parsed_mail, parsed_packages = _parse_delivery_counts(msg)
+        digest = _parse_delivery_digest(msg)
 
-        # Extract mail piece images for previews (not used for counts when email copy is available).
+        # Extract real letter scans only (exclude Local XChange / campaign ads).
         images = _extract_images_from_message(msg)
 
-        if parsed_mail is not None:
-            mailpiece_count = parsed_mail
-            package_count = parsed_packages or 0
-            logger.info(
-                "Parsed delivery counts from email copy: %s mailpiece(s), %s package(s)",
-                mailpiece_count,
-                package_count,
-            )
+        if digest["mailpiece_count"] is not None:
+            mailpiece_count = digest["mailpiece_count"]
         else:
             if _has_missing_mailpiece_placeholder(msg):
                 images.append(b"")
-
             mailpiece_count = len(images)
-            package_count = 0
-            logger.info(
-                "Using image-based mail count: %s mailpiece(s) (%s with image data)",
-                mailpiece_count,
-                sum(1 for img in images if img),
-            )
+
+        # Only Expected Today packages count toward the dashboard package total.
+        package_count = digest.get("package_count") or 0
+        tracking_numbers = digest.get("tracking_numbers") or []
+
+        logger.info(
+            "Parsed Informed Delivery: %s mailpiece(s), %s Expected Today package(s), "
+            "%s tracking number(s) discovered (sections=%s)",
+            mailpiece_count,
+            package_count,
+            len(tracking_numbers),
+            digest.get("section_counts"),
+        )
 
         piece_count = mailpiece_count + package_count
 
@@ -498,6 +660,8 @@ async def check_informed_delivery(mail_config: dict[str, Any]) -> dict[str, Any]
             "package_count": package_count,
             "gif_filename": gif_filename,
             "preview_images": preview_images,
+            "tracking_numbers": tracking_numbers,
+            "section_counts": digest.get("section_counts") or {},
         }
 
     finally:

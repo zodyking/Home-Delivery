@@ -104,6 +104,9 @@ class PackageUpdate(BaseModel):
     recipient: str | None = None
     destination: str | None = None
     carrier: str | None = None
+    destination_account_id: str | None = None
+    needs_details: bool | None = None
+    auto_discovered: bool | None = None
 
 
 class ConfigUpdate(BaseModel):
@@ -316,7 +319,10 @@ async def get_package(package_id: str):
 @app.patch("/api/packages/{package_id}")
 async def update_package(package_id: str, updates: PackageUpdate):
     """Update package metadata."""
-    update_dict = {k: v for k, v in updates.model_dump().items() if v is not None}
+    update_dict = updates.model_dump(exclude_unset=True)
+    # Completing auto-discovered packages clears the details prompt.
+    if update_dict.get("recipient") and update_dict.get("destination"):
+        update_dict["needs_details"] = False
     result = await config_store.update_package(package_id, update_dict)
     if result is None:
         raise HTTPException(status_code=404, detail="Package not found")
@@ -510,6 +516,16 @@ async def _sync_mail_accounts(account_ids: list[str] | None = None) -> dict[str,
                 preview_images=preview_images,
                 last_error=None,
             )
+            discovered = []
+            try:
+                from mail.discover_packages import add_discovered_packages
+
+                discovered = await add_discovered_packages(
+                    result.get("tracking_numbers") or [],
+                    account=account,
+                )
+            except Exception as discover_exc:
+                logger.warning("Failed to auto-add discovered packages for %s: %s", label, discover_exc)
             total_pieces += piece_count
             if gif_filename and not primary_gif:
                 primary_gif = gif_filename
@@ -522,6 +538,7 @@ async def _sync_mail_accounts(account_ids: list[str] | None = None) -> dict[str,
                 "package_count": package_count,
                 "gif_url": _mail_image_url(gif_filename),
                 "preview_images": _mail_preview_payload(preview_images),
+                "discovered_packages": len(discovered),
             })
         except Exception as e:
             logger.error(f"Mail sync failed for {label}: {e}")

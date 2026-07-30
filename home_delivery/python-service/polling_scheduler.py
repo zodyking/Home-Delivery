@@ -183,6 +183,19 @@ async def _poll_mail() -> None:
                     preview_images=result.get("preview_images") or [],
                     last_error=None,
                 )
+                try:
+                    from mail.discover_packages import add_discovered_packages
+
+                    await add_discovered_packages(
+                        result.get("tracking_numbers") or [],
+                        account=account,
+                    )
+                except Exception as discover_exc:
+                    logger.warning(
+                        "Failed to auto-add discovered packages for %s: %s",
+                        account.get("label"),
+                        discover_exc,
+                    )
             except Exception as e:
                 logger.error(f"Mail check failed for {account.get('label')}: {e}")
                 await config_store.update_mail_state(
