@@ -2,7 +2,7 @@
  * Home Delivery Panel - Vanilla JS for HA custom panel / standalone Ingress
  * Design aligned with home-weather: topbar + gear settings, dashboard layout.
  */
-const PANEL_VERSION = "0.0.26";
+const PANEL_VERSION = "0.0.27";
 
 class HomeDeliveryPanel extends HTMLElement {
   constructor() {
@@ -152,13 +152,14 @@ class HomeDeliveryPanel extends HTMLElement {
   _renderMailCountBlocks(counts) {
     return `
       <div class="mail-hero-counts" aria-label="Today's mail and inbound packages">
-        <div class="mail-count-chip">
-          <span class="mail-count-large">${counts.mailpieces}</span>
-          <span class="mail-count-label">mailpiece${counts.mailpieces === 1 ? "" : "s"}</span>
+        <div class="mail-stat">
+          <span class="mail-stat-value">${counts.mailpieces}</span>
+          <span class="mail-stat-label">Mailpiece${counts.mailpieces === 1 ? "" : "s"}</span>
         </div>
-        <div class="mail-count-chip">
-          <span class="mail-count-large mail-count-large--package">${counts.packages}</span>
-          <span class="mail-count-label">inbound package${counts.packages === 1 ? "" : "s"}</span>
+        <div class="mail-stat-divider" aria-hidden="true"></div>
+        <div class="mail-stat">
+          <span class="mail-stat-value mail-stat-value--package">${counts.packages}</span>
+          <span class="mail-stat-label">Inbound package${counts.packages === 1 ? "" : "s"}</span>
         </div>
       </div>
     `;
@@ -1713,18 +1714,26 @@ class HomeDeliveryPanel extends HTMLElement {
       <article class="glass card mail-hero-card${account.last_error ? " mail-hero-card--error" : ""}">
         <div class="mail-hero-bg" aria-hidden="true"></div>
         <div class="mail-hero-inner">
-          <div class="card-head mail-hero-head">
-            <div class="mail-hero-heading">
-              <div class="mail-hero-eyebrow">Informed Delivery</div>
-              <h2 class="mail-hero-title">${this._esc(label)}</h2>
+          <header class="mail-hero-top">
+            <div class="mail-hero-brand">
+              <div class="mail-hero-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><path d="M20 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 4l-8 5-8-5V6l8 5 8-5v2z"/></svg>
+              </div>
+              <div class="mail-hero-heading">
+                <p class="mail-hero-eyebrow">Informed Delivery</p>
+                <h2 class="mail-hero-title">${this._esc(label)}</h2>
+              </div>
             </div>
-            <button type="button" class="btn btn-ghost btn-sm history-btn" data-action="open-history"${accountIdAttr} aria-label="Mail history for ${this._escapeAttr(label)}">
-              History
-            </button>
-          </div>
-          <div class="mail-hero-meta">
+            <div class="mail-hero-actions">
+              ${lastCheckStr ? `<span class="mail-hero-sync">Updated ${this._esc(lastCheckStr)}</span>` : ""}
+              <button type="button" class="btn btn-secondary btn-sm history-btn" data-action="open-history"${accountIdAttr} aria-label="Mail history for ${this._escapeAttr(label)}">
+                <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor" aria-hidden="true"><path d="M13 3a9 9 0 0 0-9 9H1l3.89 3.89.07.14L9 12H6c0-3.87 3.13-7 7-7s7 3.13 7 7-3.13 7-7 7c-1.93 0-3.68-.79-4.94-2.06l-1.42 1.42A8.954 8.954 0 0 0 13 21a9 9 0 0 0 0-18zm-1 5v5l4.28 2.54.72-1.21-3.5-2.08V8H12z"/></svg>
+                History
+              </button>
+            </div>
+          </header>
+          <div class="mail-hero-stats">
             ${this._renderMailCountBlocks(counts)}
-            ${lastCheckStr ? `<div class="mail-meta">Last checked ${lastCheckStr}</div>` : ""}
           </div>
           <div class="mail-hero-stage">
             <div class="mail-hero-preview">
@@ -1929,10 +1938,15 @@ class HomeDeliveryPanel extends HTMLElement {
 
     return `
       <article class="glass card packages-card">
-        <div class="card-head packages-head">
-          <div>
-            <div class="card-title">Packages</div>
-            <div class="card-sub">${activeCount} active · ${deliveredCount} delivered</div>
+        <header class="packages-section-head">
+          <div class="section-head-main">
+            <div class="section-icon section-icon--packages" aria-hidden="true">
+              <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M20 8h-3V6c0-1.1-.9-2-2-2H9c-1.1 0-2 .9-2 2v2H4c-1.1 0-2 .9-2 2v10h20V10c0-1.1-.9-2-2-2zM9 6h6v2H9V6zm11 12H4v-3h16v3z"/></svg>
+            </div>
+            <div class="section-head-copy">
+              <h2 class="section-title">Packages</h2>
+              <p class="section-sub">${activeCount} active · ${deliveredCount} delivered</p>
+            </div>
           </div>
           <div class="packages-toolbar">
             <div class="pkg-filter" role="tablist" aria-label="Filter packages">
@@ -1946,9 +1960,12 @@ class HomeDeliveryPanel extends HTMLElement {
                 All
               </button>
             </div>
-            <button class="btn btn-ghost btn-sm" data-action="add-package">+ Add Package</button>
+            <button class="btn btn-primary btn-sm" data-action="add-package">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor" aria-hidden="true"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/></svg>
+              Add Package
+            </button>
           </div>
-        </div>
+        </header>
         <div class="packages-body">
           ${packages.length === 0 ? `
             <div class="empty-state">
@@ -1966,13 +1983,13 @@ class HomeDeliveryPanel extends HTMLElement {
               <table class="packages-table">
                 <thead>
                   <tr>
-                    <th scope="col">Address</th>
-                    <th scope="col">For</th>
-                    <th scope="col">Carrier</th>
-                    <th scope="col">Tracking</th>
-                    <th scope="col">Status</th>
-                    <th scope="col">Latest</th>
-                    <th scope="col"><span class="visually-hidden">Actions</span></th>
+                    <th scope="col" class="col-address">Address</th>
+                    <th scope="col" class="col-recipient">For</th>
+                    <th scope="col" class="col-carrier">Carrier</th>
+                    <th scope="col" class="col-tracking">Tracking</th>
+                    <th scope="col" class="col-status">Status</th>
+                    <th scope="col" class="col-latest">Latest update</th>
+                    <th scope="col" class="col-actions"><span class="visually-hidden">Actions</span></th>
                   </tr>
                 </thead>
                 <tbody>
@@ -2018,53 +2035,62 @@ class HomeDeliveryPanel extends HTMLElement {
 
     return `
       <tr class="pkg-row ${statusClass}${needsDetails ? " needs-details" : ""}${pkg.delivered ? " is-delivered" : ""}">
-        <td data-label="Address">
+        <td data-label="Address" class="col-address">
           <div class="pkg-address">${this._esc(addressTitle)}</div>
         </td>
-        <td data-label="For">
-          <div class="pkg-recipient${showPlaceholderRecipient ? " is-empty" : ""}">${this._esc(recipientDisplay)}</div>
-          ${needsDetails ? `
-            <span class="discover-badge compact" title="Found in USPS Informed Delivery — add who it's for">
-              <span class="discover-ping" aria-hidden="true"></span>
-              Auto discovered
-            </span>
-          ` : ""}
-        </td>
-        <td data-label="Carrier">${this._carrierBadge(pkg.carrier)}</td>
-        <td data-label="Tracking">
-          <code class="pkg-tracking" title="${this._esc(tracking)}">${this._esc(tracking)}</code>
-        </td>
-        <td data-label="Status">
-          <div class="delivery-status ${statusClass}">
-            <span class="status-dot" aria-hidden="true"></span>
-            <span>${this._esc(statusLabel)}</span>
+        <td data-label="For" class="col-recipient">
+          <div class="pkg-recipient-cell">
+            <div class="pkg-recipient${showPlaceholderRecipient ? " is-empty" : ""}">${this._esc(recipientDisplay)}</div>
+            ${needsDetails ? `
+              <span class="discover-badge compact" title="Found in USPS Informed Delivery — add who it's for">
+                <span class="discover-ping" aria-hidden="true"></span>
+                Auto discovered
+              </span>
+            ` : ""}
           </div>
         </td>
-        <td data-label="Latest">
-          <div class="pkg-latest-title">${this._esc(eventTitle)}</div>
-          ${eventWhen ? `<div class="pkg-latest-when">${this._esc(eventWhen)}</div>` : ""}
+        <td data-label="Carrier" class="col-carrier">${this._carrierBadge(pkg.carrier)}</td>
+        <td data-label="Tracking" class="col-tracking">
+          <code class="pkg-tracking" title="${this._esc(tracking)}">${this._esc(tracking)}</code>
         </td>
-        <td data-label="Actions" class="pkg-actions">
-          <button type="button" class="pkg-btn pkg-btn-primary" data-action="view" data-id="${pkg.id}">
-            History
-          </button>
-          ${needsDetails ? `
-            <button type="button" class="pkg-btn" data-action="complete-details" data-id="${pkg.id}">
-              Complete
+        <td data-label="Status" class="col-status">
+          <span class="status-pill ${statusClass}">
+            <span class="status-dot" aria-hidden="true"></span>
+            <span>${this._esc(statusLabel)}</span>
+          </span>
+        </td>
+        <td data-label="Latest" class="col-latest">
+          <div class="pkg-latest">
+            <div class="pkg-latest-title">${this._esc(eventTitle)}</div>
+            ${eventWhen ? `<div class="pkg-latest-when">${this._esc(eventWhen)}</div>` : ""}
+          </div>
+        </td>
+        <td data-label="Actions" class="col-actions pkg-actions">
+          <div class="pkg-action-group" role="group" aria-label="Package actions">
+            <button type="button" class="pkg-action pkg-action--ghost" data-action="view" data-id="${pkg.id}" title="Tracking history">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor" aria-hidden="true"><path d="M13 3a9 9 0 0 0-9 9H1l3.89 3.89.07.14L9 12H6c0-3.87 3.13-7 7-7s7 3.13 7 7-3.13 7-7 7c-1.93 0-3.68-.79-4.94-2.06l-1.42 1.42A8.954 8.954 0 0 0 13 21a9 9 0 0 0 0-18zm-1 5v5l4.28 2.54.72-1.21-3.5-2.08V8H12z"/></svg>
+              <span>History</span>
             </button>
-          ` : `
-            <button type="button" class="pkg-btn" data-action="refresh" data-id="${pkg.id}" ${isRefreshing ? "disabled" : ""}>
-              ${isRefreshing ? "…" : "Refresh"}
+            ${needsDetails ? `
+              <button type="button" class="pkg-action pkg-action--accent" data-action="complete-details" data-id="${pkg.id}" title="Complete package details">
+                Complete
+              </button>
+            ` : `
+              <button type="button" class="pkg-action pkg-action--ghost" data-action="refresh" data-id="${pkg.id}" ${isRefreshing ? "disabled" : ""} title="Refresh tracking">
+                ${isRefreshing ? "…" : "Refresh"}
+              </button>
+            `}
+            <button
+              type="button"
+              class="pkg-action pkg-action--danger"
+              data-action="delete"
+              data-id="${pkg.id}"
+              aria-label="Remove package"
+              title="Remove package"
+            >
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor" aria-hidden="true"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>
             </button>
-          `}
-          <button
-            type="button"
-            class="pkg-btn pkg-btn-icon"
-            data-action="delete"
-            data-id="${pkg.id}"
-            aria-label="Remove package"
-            title="Remove package"
-          >×</button>
+          </div>
         </td>
       </tr>
     `;
@@ -4031,11 +4057,54 @@ class HomeDeliveryPanel extends HTMLElement {
       .mail-hero-inner {
         position: relative;
         z-index: 1;
-        padding: var(--space-3);
+        padding: var(--space-4);
         display: flex;
         flex-direction: column;
-        gap: var(--space-2);
+        gap: var(--space-3);
         min-height: inherit;
+      }
+
+      .mail-hero-top {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: var(--space-3);
+        padding-bottom: var(--space-3);
+        border-bottom: 1px solid color-mix(in srgb, var(--hd-border) 80%, transparent);
+      }
+
+      .mail-hero-brand {
+        display: flex;
+        align-items: flex-start;
+        gap: var(--space-3);
+        min-width: 0;
+      }
+
+      .mail-hero-icon {
+        flex-shrink: 0;
+        width: 44px;
+        height: 44px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        border-radius: var(--radius-md);
+        color: var(--hd-accent);
+        background: color-mix(in srgb, var(--hd-accent) 14%, transparent);
+        border: 1px solid color-mix(in srgb, var(--hd-accent) 28%, transparent);
+      }
+
+      .mail-hero-actions {
+        display: flex;
+        flex-direction: column;
+        align-items: flex-end;
+        gap: 6px;
+        flex-shrink: 0;
+      }
+
+      .mail-hero-sync {
+        font-size: 11px;
+        color: var(--hd-muted);
+        white-space: nowrap;
       }
 
       .mail-hero-head {
@@ -4059,12 +4128,12 @@ class HomeDeliveryPanel extends HTMLElement {
 
       .history-btn {
         flex-shrink: 0;
-        min-height: 44px;
-        color: var(--hd-accent);
+        min-height: 40px;
+        gap: 6px;
       }
 
       .history-btn:hover {
-        color: var(--hd-accent-hover);
+        transform: translateY(-1px);
       }
 
       .history-view {
@@ -4329,20 +4398,26 @@ class HomeDeliveryPanel extends HTMLElement {
       }
 
       .mail-hero-eyebrow {
-        font-size: 10px;
-        letter-spacing: 0.14em;
+        margin: 0 0 4px;
+        font-size: 11px;
+        font-weight: 600;
+        letter-spacing: 0.06em;
         text-transform: uppercase;
         color: var(--hd-muted);
-        margin-bottom: 4px;
       }
 
       .mail-hero-title {
         margin: 0;
-        font-size: clamp(20px, 3.4vw, 28px);
+        font-size: clamp(18px, 2.8vw, 24px);
         font-weight: 700;
-        letter-spacing: -0.03em;
-        line-height: 1.15;
+        letter-spacing: -0.02em;
+        line-height: 1.2;
         color: var(--hd-text);
+      }
+
+      .mail-hero-stats {
+        display: flex;
+        align-items: stretch;
       }
 
       .mail-hero-meta {
@@ -4359,9 +4434,9 @@ class HomeDeliveryPanel extends HTMLElement {
         align-items: stretch;
         gap: var(--space-2);
         min-width: 0;
-        margin-left: calc(-1 * var(--space-3));
-        margin-right: calc(-1 * var(--space-3));
-        width: calc(100% + (2 * var(--space-3)));
+        margin-left: calc(-1 * var(--space-4));
+        margin-right: calc(-1 * var(--space-4));
+        width: calc(100% + (2 * var(--space-4)));
       }
 
       .mail-hero-preview {
@@ -4378,21 +4453,51 @@ class HomeDeliveryPanel extends HTMLElement {
 
       .mail-hero-counts {
         display: flex;
-        flex-wrap: wrap;
-        gap: var(--space-2);
+        align-items: stretch;
+        width: 100%;
+        gap: 0;
         padding: 0;
-        min-width: 0;
+        border: 1px solid var(--hd-border);
+        border-radius: var(--radius-md);
+        background: rgba(255, 255, 255, 0.02);
+        overflow: hidden;
       }
 
-      .mail-count-chip {
-        display: inline-flex;
-        align-items: baseline;
-        gap: 8px;
-        min-height: 44px;
-        padding: 8px 12px;
-        border-radius: var(--radius-md);
-        background: rgba(255, 255, 255, 0.03);
-        border: 1px solid var(--hd-border);
+      .mail-stat {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 2px;
+        min-height: 72px;
+        padding: var(--space-3);
+        text-align: center;
+      }
+
+      .mail-stat-divider {
+        width: 1px;
+        align-self: stretch;
+        background: var(--hd-border);
+      }
+
+      .mail-stat-value {
+        font-size: clamp(22px, 3vw, 28px);
+        font-weight: 700;
+        color: var(--hd-accent);
+        line-height: 1;
+        letter-spacing: -0.04em;
+        font-variant-numeric: tabular-nums;
+      }
+
+      .mail-stat-value--package {
+        color: #7eb8ff;
+      }
+
+      .mail-stat-label {
+        font-size: 12px;
+        font-weight: 500;
+        color: var(--hd-muted);
       }
 
       .mail-hero-message {
@@ -4834,6 +4939,62 @@ class HomeDeliveryPanel extends HTMLElement {
 
       /* ======================== Packages ======================== */
 
+      .packages-section-head {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: var(--space-3);
+        flex-wrap: wrap;
+        margin-bottom: var(--space-4);
+        padding-bottom: var(--space-3);
+        border-bottom: 1px solid var(--hd-border);
+      }
+
+      .section-head-main {
+        display: flex;
+        align-items: flex-start;
+        gap: var(--space-3);
+        min-width: 0;
+      }
+
+      .section-icon {
+        flex-shrink: 0;
+        width: 40px;
+        height: 40px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        border-radius: var(--radius-md);
+        color: var(--hd-accent);
+        background: color-mix(in srgb, var(--hd-accent) 12%, transparent);
+        border: 1px solid color-mix(in srgb, var(--hd-accent) 24%, transparent);
+      }
+
+      .section-icon--packages {
+        color: #7eb8ff;
+        background: color-mix(in srgb, #7eb8ff 12%, transparent);
+        border-color: color-mix(in srgb, #7eb8ff 24%, transparent);
+      }
+
+      .section-head-copy {
+        min-width: 0;
+      }
+
+      .section-title {
+        margin: 0;
+        font-size: 18px;
+        font-weight: 700;
+        letter-spacing: -0.02em;
+        color: var(--hd-text);
+        line-height: 1.2;
+      }
+
+      .section-sub {
+        margin: 4px 0 0;
+        font-size: 13px;
+        color: var(--hd-muted);
+      }
+
       .packages-head {
         align-items: flex-start;
         flex-wrap: wrap;
@@ -4882,7 +5043,7 @@ class HomeDeliveryPanel extends HTMLElement {
       }
 
       .pkg-filter-btn:focus-visible,
-      .pkg-btn:focus-visible,
+      .pkg-action:focus-visible,
       .history-btn:focus-visible {
         outline: 2px solid var(--hd-accent);
         outline-offset: 2px;
@@ -4897,86 +5058,265 @@ class HomeDeliveryPanel extends HTMLElement {
         -webkit-overflow-scrolling: touch;
         margin: 0 calc(-1 * var(--space-4));
         padding: 0 var(--space-4);
+        border-radius: var(--radius-md);
       }
 
       .packages-table {
         width: 100%;
-        min-width: 860px;
-        border-collapse: collapse;
+        min-width: 920px;
+        border-collapse: separate;
+        border-spacing: 0;
+      }
+
+      .packages-table thead {
+        position: sticky;
+        top: 0;
+        z-index: 2;
+      }
+
+      .packages-table thead tr {
+        background: color-mix(in srgb, var(--hd-surface-2) 92%, transparent);
+        backdrop-filter: blur(8px);
       }
 
       .packages-table th,
       .packages-table td {
         text-align: left;
         vertical-align: middle;
-        padding: 12px 10px;
-        border-bottom: 1px solid var(--hd-border);
+        padding: 14px 12px;
       }
 
       .packages-table th {
-        font-size: 11px;
-        font-weight: 700;
-        letter-spacing: 0.08em;
-        text-transform: uppercase;
-        color: var(--hd-muted);
+        font-size: 12px;
+        font-weight: 600;
+        letter-spacing: 0.02em;
+        text-transform: none;
+        color: color-mix(in srgb, var(--hd-text) 72%, var(--hd-muted));
         white-space: nowrap;
+        border-bottom: 1px solid var(--hd-border-strong);
+      }
+
+      .packages-table tbody tr {
+        transition: background var(--dur-fast) var(--ease);
+      }
+
+      .packages-table tbody td {
+        border-bottom: 1px solid color-mix(in srgb, var(--hd-border) 85%, transparent);
+      }
+
+      .packages-table tbody tr:last-child td {
+        border-bottom: none;
+      }
+
+      .col-address { width: 16%; min-width: 140px; }
+      .col-recipient { width: 14%; min-width: 120px; }
+      .col-carrier { width: 8%; min-width: 72px; }
+      .col-tracking { width: 18%; min-width: 160px; }
+      .col-status { width: 14%; min-width: 130px; }
+      .col-latest { width: 22%; min-width: 180px; }
+      .col-actions { width: 8%; min-width: 168px; text-align: right; }
+
+      .pkg-row {
+        position: relative;
       }
 
       .pkg-row:hover {
-        background: rgba(255, 255, 255, 0.03);
+        background: rgba(255, 255, 255, 0.035);
+      }
+
+      .pkg-row:hover td:first-child {
+        box-shadow: inset 3px 0 0 var(--hd-accent);
       }
 
       .pkg-row.is-delivered {
-        opacity: 0.88;
+        opacity: 0.82;
+      }
+
+      .pkg-recipient-cell {
+        display: flex;
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 6px;
       }
 
       .pkg-address {
         font-size: 14px;
-        font-weight: 700;
-        letter-spacing: -0.02em;
-        line-height: 1.25;
+        font-weight: 600;
+        letter-spacing: -0.01em;
+        line-height: 1.3;
         color: var(--hd-text);
       }
 
       .pkg-recipient {
         font-size: 13px;
+        font-weight: 500;
         color: var(--hd-text);
       }
 
       .pkg-recipient.is-empty {
         color: #5dbe7a;
-        font-style: italic;
+        font-style: normal;
+        font-weight: 600;
       }
 
       .pkg-tracking {
-        display: block;
-        max-width: 180px;
+        display: inline-block;
+        max-width: 100%;
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
-        font-family: "Courier New", ui-monospace, monospace;
-        font-size: 12px;
-        font-weight: 600;
-        color: var(--hd-text);
+        padding: 4px 8px;
+        border-radius: var(--radius-sm);
+        font-family: ui-monospace, "Cascadia Code", "Courier New", monospace;
+        font-size: 11px;
+        font-weight: 500;
+        color: color-mix(in srgb, var(--hd-text) 88%, var(--hd-muted));
+        background: rgba(255, 255, 255, 0.04);
+        border: 1px solid var(--hd-border);
+      }
+
+      .pkg-latest {
+        min-width: 0;
       }
 
       .pkg-latest-title {
         font-size: 13px;
         font-weight: 600;
-        line-height: 1.3;
+        line-height: 1.35;
         color: var(--hd-text);
       }
 
       .pkg-latest-when {
-        margin-top: 2px;
-        font-size: 12px;
+        margin-top: 3px;
+        font-size: 11px;
         color: var(--hd-muted);
       }
 
       .pkg-actions {
         white-space: nowrap;
+        text-align: right;
       }
 
+      .pkg-action-group {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        padding: 3px;
+        border-radius: var(--radius-md);
+        background: rgba(255, 255, 255, 0.03);
+        border: 1px solid var(--hd-border);
+      }
+
+      .pkg-action {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 6px;
+        min-height: 34px;
+        padding: 0 10px;
+        border: 0;
+        border-radius: calc(var(--radius-md) - 2px);
+        background: transparent;
+        color: var(--hd-text);
+        font: inherit;
+        font-size: 12px;
+        font-weight: 600;
+        cursor: pointer;
+        transition: background var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease), transform var(--dur-fast) var(--ease);
+      }
+
+      .pkg-action:hover:not(:disabled) {
+        background: rgba(255, 255, 255, 0.08);
+      }
+
+      .pkg-action:active:not(:disabled) {
+        transform: scale(0.98);
+      }
+
+      .pkg-action:disabled {
+        opacity: 0.55;
+        cursor: not-allowed;
+      }
+
+      .pkg-action--ghost {
+        color: color-mix(in srgb, var(--hd-text) 90%, var(--hd-muted));
+      }
+
+      .pkg-action--accent {
+        color: #5dbe7a;
+        background: color-mix(in srgb, #5dbe7a 12%, transparent);
+      }
+
+      .pkg-action--accent:hover:not(:disabled) {
+        background: color-mix(in srgb, #5dbe7a 20%, transparent);
+      }
+
+      .pkg-action--danger {
+        min-width: 34px;
+        padding: 0 8px;
+        color: var(--hd-danger);
+      }
+
+      .pkg-action--danger:hover:not(:disabled) {
+        background: color-mix(in srgb, var(--hd-danger) 16%, transparent);
+      }
+
+      .status-pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 7px;
+        max-width: 100%;
+        padding: 5px 10px 5px 8px;
+        border-radius: 999px;
+        font-size: 12px;
+        font-weight: 600;
+        line-height: 1.2;
+        color: var(--hd-text);
+        background: rgba(255, 255, 255, 0.04);
+        border: 1px solid var(--hd-border);
+        white-space: nowrap;
+      }
+
+      .status-pill span:last-child {
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      .status-pill .status-dot {
+        width: 7px;
+        height: 7px;
+        box-shadow: none;
+      }
+
+      .status-pill.error {
+        color: #ffb4b4;
+        background: color-mix(in srgb, var(--hd-danger) 14%, transparent);
+        border-color: color-mix(in srgb, var(--hd-danger) 35%, transparent);
+      }
+
+      .status-pill.out-for-delivery {
+        color: #ffd68a;
+        background: color-mix(in srgb, #c98500 14%, transparent);
+        border-color: color-mix(in srgb, #c98500 35%, transparent);
+      }
+
+      .status-pill.delivered {
+        color: #9be6b8;
+        background: color-mix(in srgb, #2f8f57 14%, transparent);
+        border-color: color-mix(in srgb, #2f8f57 35%, transparent);
+      }
+
+      .status-pill.in-transit {
+        color: #9ecfff;
+        background: color-mix(in srgb, #2f83d2 14%, transparent);
+        border-color: color-mix(in srgb, #2f83d2 35%, transparent);
+      }
+
+      .status-pill.in-transit .status-dot {
+        background: #2f83d2;
+      }
+
+      /* Legacy button classes kept for modals */
       .pkg-btn {
         display: inline-flex;
         align-items: center;
@@ -5133,6 +5473,22 @@ class HomeDeliveryPanel extends HTMLElement {
       }
 
       @media (max-width: 768px) {
+        .mail-hero-top {
+          flex-direction: column;
+          align-items: stretch;
+        }
+
+        .mail-hero-actions {
+          flex-direction: row;
+          align-items: center;
+          justify-content: space-between;
+        }
+
+        .packages-section-head {
+          flex-direction: column;
+          align-items: stretch;
+        }
+
         .packages-head {
           flex-direction: column;
           align-items: stretch;
@@ -5170,12 +5526,16 @@ class HomeDeliveryPanel extends HTMLElement {
           background: var(--hd-surface-2);
         }
 
+        .packages-table tr:hover td:first-child {
+          box-shadow: none;
+        }
+
         .packages-table td {
           display: flex;
           align-items: flex-start;
           justify-content: space-between;
           gap: var(--space-3);
-          padding: 8px 0;
+          padding: 10px 0;
           border-bottom: 1px solid var(--hd-border);
         }
 
@@ -5186,11 +5546,10 @@ class HomeDeliveryPanel extends HTMLElement {
 
         .packages-table td::before {
           content: attr(data-label);
-          flex: 0 0 72px;
+          flex: 0 0 88px;
           font-size: 11px;
-          font-weight: 700;
-          letter-spacing: 0.06em;
-          text-transform: uppercase;
+          font-weight: 600;
+          letter-spacing: 0.03em;
           color: var(--hd-muted);
         }
 
@@ -5202,18 +5561,20 @@ class HomeDeliveryPanel extends HTMLElement {
 
         .pkg-actions {
           flex: 1;
-          display: flex;
-          flex-wrap: wrap;
-          justify-content: flex-end;
-          gap: 6px;
+          text-align: right;
         }
 
-        .pkg-btn {
-          margin: 0;
+        .pkg-action-group {
+          width: 100%;
+          justify-content: flex-end;
+          flex-wrap: wrap;
+        }
+
+        .pkg-action {
           min-height: 44px;
         }
 
-        .pkg-btn-icon {
+        .pkg-action--danger {
           min-width: 44px;
         }
       }
@@ -6022,7 +6383,14 @@ class HomeDeliveryPanel extends HTMLElement {
       }
 
       .btn-secondary {
-        background: transparent;
+        background: rgba(255, 255, 255, 0.04);
+        border-color: var(--hd-border-strong);
+        color: var(--hd-text);
+      }
+
+      .btn-secondary:hover:not(:disabled) {
+        background: rgba(255, 255, 255, 0.08);
+        border-color: color-mix(in srgb, var(--hd-accent) 40%, var(--hd-border-strong));
       }
 
       .btn-icon {
