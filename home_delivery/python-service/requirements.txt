@@ -7,5 +7,6 @@ aiohttp>=3.11.0
 imageio>=2.35.0
 Pillow>=10.4.0
 python-resize-image>=1.1.20
-pytesseract>=0.3.13
+openocr-python>=0.1.5
 numpy>=1.26.0
+torch>=2.0.0

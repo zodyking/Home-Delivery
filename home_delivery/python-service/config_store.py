@@ -10,7 +10,7 @@ import copy
 from pathlib import Path
 from typing import Any
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from data_config import DATA_DIR
 
@@ -305,6 +305,7 @@ class ConfigStore:
         mailpiece_count: int | None = None,
         package_count: int | None = None,
         last_error: str | None = None,
+        letters: list[dict[str, Any]] | None = None,
     ) -> None:
         """Update mail state for a specific account after IMAP check."""
         updates: dict[str, Any] = {
@@ -316,6 +317,8 @@ class ConfigStore:
             "last_check": datetime.now(timezone.utc).isoformat(),
             "last_error": last_error,
         }
+        if letters is not None:
+            updates["letters"] = letters
         await self.update_mail_account(account_id, updates)
 
     async def get_mail_history(self) -> dict[str, Any]:
@@ -407,10 +410,46 @@ class ConfigStore:
             }
 
             history[date_key] = entry
-            # Keep at most ~45 days of history
-            for old_key in sorted(history.keys())[:-45]:
+            self._trim_mail_history(history, max_days=30)
+
+            await self._save_locked()
+            return copy.deepcopy(entry)
+
+    @staticmethod
+    def _trim_mail_history(history: dict[str, Any], *, max_days: int = 30) -> None:
+        """Drop history entries older than max_days (by date key)."""
+        if not history or max_days <= 0:
+            return
+        cutoff = (
+            datetime.now(timezone.utc).date() - timedelta(days=max_days - 1)
+        ).isoformat()
+        for old_key in list(history.keys()):
+            if old_key < cutoff:
                 history.pop(old_key, None)
 
+    async def update_mail_history_day_letters(
+        self,
+        date_key: str,
+        letters: list[dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        """Replace letter OCR metadata for a history day."""
+        if self._config is None:
+            await self.load()
+
+        async with self._lock:
+            history = self._config.setdefault("mail", {"accounts": [], "history": {}}).setdefault("history", {})
+            if not isinstance(history, dict):
+                return None
+            entry = history.get(date_key)
+            if not entry:
+                return None
+
+            entry["letters"] = copy.deepcopy(letters)
+            entry["preview_images"] = [
+                letter.get("image") for letter in letters if letter.get("image")
+            ]
+            history[date_key] = entry
+            self._trim_mail_history(history, max_days=30)
             await self._save_locked()
             return copy.deepcopy(entry)
 

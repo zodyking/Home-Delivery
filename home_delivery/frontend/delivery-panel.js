@@ -2,7 +2,7 @@
  * Home Delivery Panel - Vanilla JS for HA custom panel / standalone Ingress
  * Design aligned with home-weather: topbar + gear settings, dashboard layout.
  */
-const PANEL_VERSION = "0.0.25";
+const PANEL_VERSION = "0.0.26";
 
 class HomeDeliveryPanel extends HTMLElement {
   constructor() {
@@ -38,6 +38,7 @@ class HomeDeliveryPanel extends HTMLElement {
     this._historySelectedDate = null;
     this._historyMonth = null; // Date at first of visible month
     this._historyAccountId = null;
+    this._packageFilter = "active";
     this._expandedSections = new Set(["general", "media-players"]);
   }
 
@@ -151,13 +152,13 @@ class HomeDeliveryPanel extends HTMLElement {
   _renderMailCountBlocks(counts) {
     return `
       <div class="mail-hero-counts" aria-label="Today's mail and inbound packages">
-        <div class="mail-count-block">
-          <div class="mail-count-large">${counts.mailpieces}</div>
-          <div class="mail-count-label">mailpiece${counts.mailpieces === 1 ? "" : "s"}</div>
+        <div class="mail-count-chip">
+          <span class="mail-count-large">${counts.mailpieces}</span>
+          <span class="mail-count-label">mailpiece${counts.mailpieces === 1 ? "" : "s"}</span>
         </div>
-        <div class="mail-count-block">
-          <div class="mail-count-large mail-count-large--package">${counts.packages}</div>
-          <div class="mail-count-label">inbound package${counts.packages === 1 ? "" : "s"}</div>
+        <div class="mail-count-chip">
+          <span class="mail-count-large mail-count-large--package">${counts.packages}</span>
+          <span class="mail-count-label">inbound package${counts.packages === 1 ? "" : "s"}</span>
         </div>
       </div>
     `;
@@ -165,8 +166,9 @@ class HomeDeliveryPanel extends HTMLElement {
 
   _mailPreviewHtml(account, label = "Mail preview") {
     const previewImages = account?.preview_images || [];
+    const letters = account?.letters || [];
     if (previewImages.length > 0) {
-      return this._mailCarouselHtml(previewImages, label);
+      return this._mailCarouselHtml(previewImages, letters, label);
     }
 
     const gifUrl = account?.gif_url;
@@ -187,15 +189,26 @@ class HomeDeliveryPanel extends HTMLElement {
     `;
   }
 
-  _mailCarouselHtml(images, label) {
-    const slides = images.map((image, index) => `
+  _mailCarouselHtml(images, letters = [], label) {
+    const slides = images.map((image, index) => {
+      const letter = letters[index] || {};
+      const senderName = letter.from_name || "";
+      const recipientName = letter.to_name || "";
+      const hasInfo = senderName || recipientName;
+      return `
       <figure class="mail-carousel-slide ${index === 0 ? "active" : ""}" data-index="${index}">
         <img src="${this._esc(this._apiUrl(image.url))}" alt="${this._esc(label)} ${index + 1} of ${images.length}"
           loading="${index === 0 ? "eager" : "lazy"}"
           onerror="this.closest('.mail-carousel')?.classList.add('mail-carousel--broken');" />
         <span class="mail-carousel-badge">Letter #${index + 1}</span>
+        ${hasInfo ? `
+          <div class="mail-carousel-info">
+            ${senderName ? `<span class="carousel-from" title="From: ${this._escapeAttr(senderName)}"><svg viewBox="0 0 24 24" width="12" height="12" fill="currentColor"><path d="M20 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 4l-8 5-8-5V6l8 5 8-5v2z"/></svg> ${this._esc(senderName)}</span>` : ""}
+            ${recipientName ? `<span class="carousel-for" title="For: ${this._escapeAttr(recipientName)}"><svg viewBox="0 0 24 24" width="12" height="12" fill="currentColor"><path d="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z"/></svg> ${this._esc(recipientName)}</span>` : ""}
+          </div>
+        ` : ""}
       </figure>
-    `).join("");
+    `}).join("");
 
     return `
       <div class="mail-carousel" data-slide-count="${images.length}" aria-label="${this._esc(label)}">
@@ -844,6 +857,10 @@ class HomeDeliveryPanel extends HTMLElement {
     return parts.length ? parts : [raw];
   }
 
+  _packageStreetTitle(destination) {
+    return this._packageAddressLines(destination)[0] || "Address pending";
+  }
+
   _eventRegionCode(location) {
     const loc = String(location || "").toUpperCase();
     const state = loc.match(/\b([A-Z]{2})\b(?=\s*\d{5}|\s*$|,)/);
@@ -964,10 +981,19 @@ class HomeDeliveryPanel extends HTMLElement {
     }
   }
 
-  async _loadMailHistory({ silent = false } = {}) {
+  async _loadMailHistory({ silent = false, backfill = false } = {}) {
     this._historyLoading = true;
     if (!silent) this._render();
     try {
+      if (backfill) {
+        await this._fetchApi("/api/mail/history/sync", {
+          method: "POST",
+          body: JSON.stringify({
+            days: 30,
+            account_id: this._historyAccountId || undefined,
+          }),
+        });
+      }
       const resp = await this._fetchApi("/api/mail/history");
       this._mailHistory = resp.days || [];
       if (!this._historyMonth) {
@@ -986,7 +1012,7 @@ class HomeDeliveryPanel extends HTMLElement {
     this._historyAccountId = accountId || null;
     this._historySelectedDate = null;
     this._navigateTo("history");
-    await this._loadMailHistory();
+    await this._loadMailHistory({ backfill: true });
   }
 
   _getHistoryAccountLabel() {
@@ -1688,22 +1714,23 @@ class HomeDeliveryPanel extends HTMLElement {
         <div class="mail-hero-bg" aria-hidden="true"></div>
         <div class="mail-hero-inner">
           <div class="card-head mail-hero-head">
-            <div>
+            <div class="mail-hero-heading">
               <div class="mail-hero-eyebrow">Informed Delivery</div>
-              <div class="card-title">Mail Today</div>
-              <div class="card-sub">${this._esc(label)}</div>
+              <h2 class="mail-hero-title">${this._esc(label)}</h2>
             </div>
-            <button type="button" class="btn-link history-btn" data-action="open-history"${accountIdAttr} aria-label="Mail history for ${this._escapeAttr(label)}">
+            <button type="button" class="btn btn-ghost btn-sm history-btn" data-action="open-history"${accountIdAttr} aria-label="Mail history for ${this._escapeAttr(label)}">
               History
             </button>
+          </div>
+          <div class="mail-hero-meta">
+            ${this._renderMailCountBlocks(counts)}
+            ${lastCheckStr ? `<div class="mail-meta">Last checked ${lastCheckStr}</div>` : ""}
           </div>
           <div class="mail-hero-stage">
             <div class="mail-hero-preview">
               ${this._mailPreviewHtml(account, `${label} mail preview`)}
             </div>
-            ${this._renderMailCountBlocks(counts)}
           </div>
-          ${lastCheckStr ? `<div class="mail-meta">Last checked: ${lastCheckStr}</div>` : ""}
           ${account.last_error ? `<div class="mail-meta mail-meta-warn">${this._esc(account.last_error)}</div>` : ""}
           ${options.showDisabledWarning ? `<div class="mail-meta mail-meta-warn">All addresses are disabled — enable one in Settings</div>` : ""}
         </div>
@@ -1811,7 +1838,7 @@ class HomeDeliveryPanel extends HTMLElement {
           </div>
           <div class="history-grid">
             ${this._historyLoading && !(this._mailHistory || []).length
-              ? `<div class="history-loading">Loading history…</div>`
+              ? `<div class="history-loading">Syncing 30 days of mail history…</div>`
               : cells.join("")}
           </div>
           <p class="hint history-legend">m = mailpieces · p = inbound packages · tap a day for letters</p>
@@ -1832,7 +1859,12 @@ class HomeDeliveryPanel extends HTMLElement {
       </div>
       ${letters.length === 0 ? `<p class="muted">No letter images for this day</p>` : `
         <div class="history-letters">
-          ${letters.map((letter, index) => `
+          ${letters.map((letter, index) => {
+            const hasSender = letter.from_name || letter.from_address;
+            const hasRecipient = letter.to_name || letter.to_address;
+            const senderName = letter.from_name || (letter.from_address ? letter.from_address.split(",")[0] : "");
+            const recipientName = letter.to_name || (letter.to_address ? letter.to_address.split(",")[0] : "");
+            return `
             <article class="history-letter">
               <div class="history-letter-preview">
                 ${letter.url || letter.image ? `
@@ -1842,29 +1874,29 @@ class HomeDeliveryPanel extends HTMLElement {
                 ` : `<div class="mail-preview--placeholder">No image</div>`}
               </div>
               <div class="history-letter-meta">
-                <div class="detail-row">
-                  <span class="detail-label">From</span>
-                  <span class="detail-value">${this._esc(letter.from_name || letter.from_address?.split(",")[0] || "—")}</span>
-                </div>
-                ${letter.from_address ? `
-                  <div class="detail-row">
-                    <span class="detail-label">Sender addr</span>
-                    <span class="detail-value muted">${this._esc(letter.from_address)}</span>
+                <div class="letter-party letter-party--sender${hasSender ? "" : " letter-party--unknown"}">
+                  <div class="letter-party-icon">
+                    <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M20 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 4l-8 5-8-5V6l8 5 8-5v2z"/></svg>
                   </div>
-                ` : ""}
-                <div class="detail-row">
-                  <span class="detail-label">For</span>
-                  <span class="detail-value">${this._esc(letter.to_name || letter.to_address?.split(",")[0] || "—")}</span>
-                </div>
-                ${letter.to_address ? `
-                  <div class="detail-row">
-                    <span class="detail-label">Deliver to</span>
-                    <span class="detail-value muted">${this._esc(letter.to_address)}</span>
+                  <div class="letter-party-content">
+                    <span class="letter-party-label">From</span>
+                    <span class="letter-party-name">${this._esc(senderName || "Unknown sender")}</span>
+                    ${letter.from_address ? `<span class="letter-party-address">${this._esc(letter.from_address)}</span>` : ""}
                   </div>
-                ` : ""}
+                </div>
+                <div class="letter-party letter-party--recipient${hasRecipient ? "" : " letter-party--unknown"}">
+                  <div class="letter-party-icon">
+                    <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z"/></svg>
+                  </div>
+                  <div class="letter-party-content">
+                    <span class="letter-party-label">For</span>
+                    <span class="letter-party-name">${this._esc(recipientName || "Resident")}</span>
+                    ${letter.to_address ? `<span class="letter-party-address">${this._esc(letter.to_address)}</span>` : ""}
+                  </div>
+                </div>
               </div>
             </article>
-          `).join("")}
+          `}).join("")}
         </div>
       `}
     `;
@@ -1881,15 +1913,41 @@ class HomeDeliveryPanel extends HTMLElement {
     });
     const activeCount = packages.filter((p) => !p.delivered).length;
     const deliveredCount = packages.length - activeCount;
+    const filter = this._packageFilter === "delivered" || this._packageFilter === "all"
+      ? this._packageFilter
+      : "active";
+    const filtered = packages.filter((pkg) => {
+      if (filter === "delivered") return !!pkg.delivered;
+      if (filter === "active") return !pkg.delivered;
+      return true;
+    });
+    const filterEmptyLabel = filter === "delivered"
+      ? "No delivered packages"
+      : filter === "active"
+        ? "No active packages"
+        : "No packages being tracked";
 
     return `
       <article class="glass card packages-card">
-        <div class="card-head">
+        <div class="card-head packages-head">
           <div>
             <div class="card-title">Packages</div>
-            <div class="card-sub">${activeCount} active${deliveredCount ? ` · ${deliveredCount} delivered` : ""}</div>
+            <div class="card-sub">${activeCount} active · ${deliveredCount} delivered</div>
           </div>
-          <button class="btn btn-ghost btn-sm" data-action="add-package">+ Add Package</button>
+          <div class="packages-toolbar">
+            <div class="pkg-filter" role="tablist" aria-label="Filter packages">
+              <button type="button" class="pkg-filter-btn${filter === "active" ? " is-active" : ""}" role="tab" aria-selected="${filter === "active"}" data-action="filter-packages" data-filter="active">
+                Active
+              </button>
+              <button type="button" class="pkg-filter-btn${filter === "delivered" ? " is-active" : ""}" role="tab" aria-selected="${filter === "delivered"}" data-action="filter-packages" data-filter="delivered">
+                Delivered
+              </button>
+              <button type="button" class="pkg-filter-btn${filter === "all" ? " is-active" : ""}" role="tab" aria-selected="${filter === "all"}" data-action="filter-packages" data-filter="all">
+                All
+              </button>
+            </div>
+            <button class="btn btn-ghost btn-sm" data-action="add-package">+ Add Package</button>
+          </div>
         </div>
         <div class="packages-body">
           ${packages.length === 0 ? `
@@ -1898,9 +1956,29 @@ class HomeDeliveryPanel extends HTMLElement {
               <p>No packages being tracked</p>
               <p class="muted">Click "+ Add Package" to start</p>
             </div>
+          ` : filtered.length === 0 ? `
+            <div class="empty-state">
+              <p>${filterEmptyLabel}</p>
+              <p class="muted">Switch filters to see other packages</p>
+            </div>
           ` : `
-            <div class="package-grid">
-              ${packages.map(p => this._renderPackageCard(p)).join("")}
+            <div class="packages-table-wrap">
+              <table class="packages-table">
+                <thead>
+                  <tr>
+                    <th scope="col">Address</th>
+                    <th scope="col">For</th>
+                    <th scope="col">Carrier</th>
+                    <th scope="col">Tracking</th>
+                    <th scope="col">Status</th>
+                    <th scope="col">Latest</th>
+                    <th scope="col"><span class="visually-hidden">Actions</span></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${filtered.map((pkg) => this._renderPackageRow(pkg)).join("")}
+                </tbody>
+              </table>
             </div>
           `}
         </div>
@@ -1918,7 +1996,7 @@ class HomeDeliveryPanel extends HTMLElement {
     return status;
   }
 
-  _renderPackageCard(pkg) {
+  _renderPackageRow(pkg) {
     const isRefreshing = this._refreshingPackage === pkg.id;
     const needsDetails = this._needsPackageDetails(pkg);
     const forName = (pkg.recipient || "").trim();
@@ -1928,102 +2006,67 @@ class HomeDeliveryPanel extends HTMLElement {
     const destination = (pkg.destination || "").trim();
     const detail = (pkg.status_detail || "").trim();
     const latest = pkg.events?.[0];
-    const carrierKey = this._carrierClass(pkg.carrier);
-    const meta = this._carrierMeta(pkg.carrier);
     const tracking = String(pkg.tracking_number || "");
-    const addressLines = this._packageAddressLines(destination);
+    const addressTitle = this._packageStreetTitle(destination);
     const recipientDisplay = showPlaceholderRecipient
-      ? (needsDetails ? "Add recipient" : "Someone")
+      ? (needsDetails ? "Add recipient" : "—")
       : forName;
-    const eventTitle = detail || statusLabel || "Status update";
-    const eventCode = this._eventRegionCode(latest?.location);
-    const eventCodeLabel = latest?.location ? "Origin Facility" : "Awaiting Scan";
+    const eventTitle = detail || statusLabel || "—";
     const eventDate = latest?.date || "";
     const eventTime = latest?.time || "";
-    const eventWhen = [eventDate, eventTime].filter(Boolean).join(eventDate && eventTime ? " at " : "");
-    const eventLocation = (latest?.location || "").trim();
-    const sourceLine = pkg.auto_discovered
-      ? "Source: Informed Delivery"
-      : (pkg.error ? `Error: ${pkg.error}` : "");
+    const eventWhen = [eventDate, eventTime].filter(Boolean).join(" ");
 
     return `
-      <article class="package-card ${statusClass} carrier-${carrierKey}${needsDetails ? " needs-details" : ""}${pkg.delivered ? " is-delivered" : ""}" data-package-id="${pkg.id}">
-        <section class="pkg-label">
-          <header class="label-header">
-            <div class="service-block service-block--full">
-              <strong>${this._esc(meta.label || meta.service)}</strong>
-              <span>${this._esc(meta.subtitle)}</span>
-            </div>
-          </header>
-
-          <section class="label-meta">
-            <div class="tracking-summary">
-              <div class="small-label">Tracking number</div>
-              <div class="tracking-number" title="${this._esc(tracking)}">${this._esc(tracking)}</div>
-            </div>
-          </section>
-
-          <section class="address-section">
-            <div class="ship-to">Ship To</div>
-            <div class="recipient">
-              <h3 class="recipient-name ${showPlaceholderRecipient ? "is-empty" : ""}">${this._esc(recipientDisplay)}</h3>
-              <p class="recipient-address">
-                ${addressLines.map((line) => this._esc(line)).join("<br />")}
-              </p>
-              <div class="delivery-status ${statusClass}">
-                <span class="status-dot" aria-hidden="true"></span>
-                <span>${this._esc(statusLabel)}</span>
-              </div>
-              ${needsDetails ? `
-                <div class="discover-badge compact" title="Found in USPS Informed Delivery — add who it's for">
-                  <span class="discover-ping" aria-hidden="true"></span>
-                  Auto discovered
-                </div>
-              ` : ""}
-            </div>
-          </section>
-
-          <section class="tracking-event">
-            <div class="event-code">
-              <div>
-                <strong>${this._esc(eventCode)}</strong>
-                <span>${this._esc(eventCodeLabel)}</span>
-              </div>
-            </div>
-            <div class="event-details">
-              <h4 class="event-title">${this._esc(eventTitle)}</h4>
-              <div class="event-meta">
-                ${eventWhen ? `${this._esc(eventWhen)}<br />` : ""}
-                ${eventLocation ? `<span class="event-location">${this._esc(eventLocation)}</span><br />` : ""}
-                ${sourceLine ? this._esc(sourceLine) : (pkg.delivered ? "Delivered" : "Live tracking")}
-              </div>
-            </div>
-          </section>
-
-          <footer class="label-footer">
-            ${needsDetails ? `
-              <button class="action-button primary" type="button" data-action="complete-details" data-id="${pkg.id}">
-                Complete details
-              </button>
-            ` : `
-              <button class="action-button" type="button" data-action="refresh" data-id="${pkg.id}" ${isRefreshing ? "disabled" : ""}>
-                ${isRefreshing ? "..." : "Refresh"}
-              </button>
-            `}
-            <button class="action-button ${needsDetails ? "" : "primary"}" type="button" data-action="view" data-id="${pkg.id}">
-              View Details
+      <tr class="pkg-row ${statusClass}${needsDetails ? " needs-details" : ""}${pkg.delivered ? " is-delivered" : ""}">
+        <td data-label="Address">
+          <div class="pkg-address">${this._esc(addressTitle)}</div>
+        </td>
+        <td data-label="For">
+          <div class="pkg-recipient${showPlaceholderRecipient ? " is-empty" : ""}">${this._esc(recipientDisplay)}</div>
+          ${needsDetails ? `
+            <span class="discover-badge compact" title="Found in USPS Informed Delivery — add who it's for">
+              <span class="discover-ping" aria-hidden="true"></span>
+              Auto discovered
+            </span>
+          ` : ""}
+        </td>
+        <td data-label="Carrier">${this._carrierBadge(pkg.carrier)}</td>
+        <td data-label="Tracking">
+          <code class="pkg-tracking" title="${this._esc(tracking)}">${this._esc(tracking)}</code>
+        </td>
+        <td data-label="Status">
+          <div class="delivery-status ${statusClass}">
+            <span class="status-dot" aria-hidden="true"></span>
+            <span>${this._esc(statusLabel)}</span>
+          </div>
+        </td>
+        <td data-label="Latest">
+          <div class="pkg-latest-title">${this._esc(eventTitle)}</div>
+          ${eventWhen ? `<div class="pkg-latest-when">${this._esc(eventWhen)}</div>` : ""}
+        </td>
+        <td data-label="Actions" class="pkg-actions">
+          <button type="button" class="pkg-btn pkg-btn-primary" data-action="view" data-id="${pkg.id}">
+            History
+          </button>
+          ${needsDetails ? `
+            <button type="button" class="pkg-btn" data-action="complete-details" data-id="${pkg.id}">
+              Complete
             </button>
-            <button
-              class="action-button remove"
-              type="button"
-              data-action="delete"
-              data-id="${pkg.id}"
-              aria-label="Remove package"
-              title="Remove package"
-            >×</button>
-          </footer>
-        </section>
-      </article>
+          ` : `
+            <button type="button" class="pkg-btn" data-action="refresh" data-id="${pkg.id}" ${isRefreshing ? "disabled" : ""}>
+              ${isRefreshing ? "…" : "Refresh"}
+            </button>
+          `}
+          <button
+            type="button"
+            class="pkg-btn pkg-btn-icon"
+            data-action="delete"
+            data-id="${pkg.id}"
+            aria-label="Remove package"
+            title="Remove package"
+          >×</button>
+        </td>
+      </tr>
     `;
   }
 
@@ -2034,12 +2077,17 @@ class HomeDeliveryPanel extends HTMLElement {
     const lastPolled = pkg.last_polled ? this._formatRelativeTime(pkg.last_polled) : "Never";
     const eventCount = pkg.events?.length || 0;
 
+    const addressTitle = this._packageStreetTitle(pkg.destination);
+
     return `
       <div class="modal-backdrop" data-action="close-detail">
-        <div class="modal" onclick="event.stopPropagation()">
+        <div class="modal modal--tracking" role="dialog" aria-modal="true" aria-labelledby="pkg-history-title" onclick="event.stopPropagation()">
           <div class="modal-header">
-            <h2>${this._carrierBadge(pkg.carrier)} ${this._esc(pkg.tracking_number)}</h2>
-            <button class="close-btn" data-action="close-detail">&times;</button>
+            <div>
+              <h2 id="pkg-history-title">${this._esc(addressTitle)}</h2>
+              <div class="modal-sub">${this._carrierBadge(pkg.carrier)} <span>${this._esc(pkg.tracking_number)}</span></div>
+            </div>
+            <button class="close-btn" data-action="close-detail" aria-label="Close tracking history">&times;</button>
           </div>
           <div class="modal-body">
             <div class="detail-row">
@@ -3416,6 +3464,12 @@ class HomeDeliveryPanel extends HTMLElement {
       case "refresh":
         await this._refreshPackage(data.id);
         break;
+      case "filter-packages":
+        this._packageFilter = data.filter === "delivered" || data.filter === "all"
+          ? data.filter
+          : "active";
+        this._render();
+        break;
       case "view":
         this._selectedPackage = this._packages.find(p => p.id === data.id);
         this._render();
@@ -3467,10 +3521,19 @@ class HomeDeliveryPanel extends HTMLElement {
         try {
           const resp = await this._fetchApi("/api/mail/history/sync", {
             method: "POST",
-            body: JSON.stringify({ days: 30 }),
+            body: JSON.stringify({
+              days: 30,
+              account_id: this._historyAccountId || undefined,
+              force: true,
+            }),
           });
           this._mailHistory = resp.days || [];
-          this._showToast(`Loaded ${resp.count || 0} history day${(resp.count || 0) === 1 ? "" : "s"}`);
+          const loaded = resp.history_days || 0;
+          const reocr = resp.reocr_letters || 0;
+          const parts = [];
+          if (loaded) parts.push(`${loaded} day${loaded === 1 ? "" : "s"} synced`);
+          if (reocr) parts.push(`${reocr} letter${reocr === 1 ? "" : "s"} re-read`);
+          this._showToast(parts.length ? parts.join(" · ") : `Loaded ${resp.count || 0} history day${(resp.count || 0) === 1 ? "" : "s"}`);
         } catch (err) {
           this._showToast(err.message || "History sync failed", { error: true });
         } finally {
@@ -3899,8 +3962,8 @@ class HomeDeliveryPanel extends HTMLElement {
           animation: none;
         }
 
-        .package-card:hover {
-          transform: none;
+        .pkg-row:hover {
+          background: transparent;
         }
       }
 
@@ -3995,10 +4058,9 @@ class HomeDeliveryPanel extends HTMLElement {
       }
 
       .history-btn {
-        font-size: 12px;
-        color: var(--hd-accent);
-        padding: 4px 0;
         flex-shrink: 0;
+        min-height: 44px;
+        color: var(--hd-accent);
       }
 
       .history-btn:hover {
@@ -4166,12 +4228,129 @@ class HomeDeliveryPanel extends HTMLElement {
         padding: 3px 0;
       }
 
+      .letter-party {
+        display: flex;
+        gap: var(--space-3);
+        padding: var(--space-3);
+        border-radius: var(--radius-md);
+        background: var(--hd-surface);
+        margin-bottom: var(--space-2);
+        border: 1px solid var(--hd-border);
+        transition: box-shadow 0.15s ease;
+      }
+
+      .letter-party:hover {
+        box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+      }
+
+      .letter-party--sender {
+        background: linear-gradient(135deg, rgba(59, 130, 246, 0.06) 0%, rgba(59, 130, 246, 0.02) 100%);
+        border-color: rgba(59, 130, 246, 0.2);
+      }
+
+      .letter-party--recipient {
+        background: linear-gradient(135deg, rgba(16, 185, 129, 0.06) 0%, rgba(16, 185, 129, 0.02) 100%);
+        border-color: rgba(16, 185, 129, 0.2);
+      }
+
+      .letter-party--unknown {
+        opacity: 0.7;
+        background: var(--hd-surface);
+        border-style: dashed;
+      }
+
+      .letter-party-icon {
+        flex-shrink: 0;
+        width: 36px;
+        height: 36px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        border-radius: 50%;
+        background: var(--hd-bg);
+      }
+
+      .letter-party--sender .letter-party-icon {
+        color: #3b82f6;
+        background: rgba(59, 130, 246, 0.1);
+      }
+
+      .letter-party--recipient .letter-party-icon {
+        color: #10b981;
+        background: rgba(16, 185, 129, 0.1);
+      }
+
+      .letter-party--unknown .letter-party-icon {
+        color: var(--hd-muted);
+        background: var(--hd-surface);
+      }
+
+      .letter-party-content {
+        flex: 1;
+        min-width: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+      }
+
+      .letter-party-label {
+        font-size: 10px;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        color: var(--hd-muted);
+      }
+
+      .letter-party-name {
+        font-size: 14px;
+        font-weight: 600;
+        color: var(--hd-text);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      .letter-party-address {
+        font-size: 12px;
+        color: var(--hd-muted);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      .history-letter-meta {
+        display: flex;
+        flex-direction: column;
+        gap: var(--space-2);
+      }
+
+      .mail-hero-heading {
+        min-width: 0;
+      }
+
       .mail-hero-eyebrow {
         font-size: 10px;
         letter-spacing: 0.14em;
         text-transform: uppercase;
         color: var(--hd-muted);
-        margin-bottom: 2px;
+        margin-bottom: 4px;
+      }
+
+      .mail-hero-title {
+        margin: 0;
+        font-size: clamp(20px, 3.4vw, 28px);
+        font-weight: 700;
+        letter-spacing: -0.03em;
+        line-height: 1.15;
+        color: var(--hd-text);
+      }
+
+      .mail-hero-meta {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: var(--space-3);
+        flex-wrap: wrap;
       }
 
       .mail-hero-stage {
@@ -4198,16 +4377,20 @@ class HomeDeliveryPanel extends HTMLElement {
       }
 
       .mail-hero-counts {
-        display: grid;
-        grid-template-columns: repeat(2, minmax(0, 1fr));
+        display: flex;
+        flex-wrap: wrap;
         gap: var(--space-2);
-        padding: 0 var(--space-3);
+        padding: 0;
+        min-width: 0;
       }
 
-      .mail-count-block {
-        text-align: center;
-        padding: var(--space-2);
-        border-radius: var(--radius-sm);
+      .mail-count-chip {
+        display: inline-flex;
+        align-items: baseline;
+        gap: 8px;
+        min-height: 44px;
+        padding: 8px 12px;
+        border-radius: var(--radius-md);
         background: rgba(255, 255, 255, 0.03);
         border: 1px solid var(--hd-border);
       }
@@ -4232,18 +4415,17 @@ class HomeDeliveryPanel extends HTMLElement {
       }
 
       .mail-count-large {
-        font-size: clamp(22px, 5.5vw, 32px);
+        font-size: clamp(18px, 3vw, 24px);
         font-weight: 700;
         color: var(--hd-accent);
-        line-height: 0.95;
-        letter-spacing: -0.06em;
+        line-height: 1;
+        letter-spacing: -0.05em;
         font-variant-numeric: tabular-nums;
       }
 
       .mail-count-label {
-        font-size: 14px;
+        font-size: 13px;
         color: var(--hd-muted);
-        margin-top: var(--space-1);
       }
 
       .mail-count-large--package {
@@ -4286,6 +4468,10 @@ class HomeDeliveryPanel extends HTMLElement {
         font-size: 12px;
         color: var(--hd-muted);
         margin-top: var(--space-1);
+      }
+
+      .mail-hero-meta .mail-meta {
+        margin-top: 0;
       }
 
       .mail-meta-warn {
@@ -4364,6 +4550,48 @@ class HomeDeliveryPanel extends HTMLElement {
         pointer-events: none;
         z-index: 2;
         box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+      }
+
+      .mail-carousel-info {
+        position: absolute;
+        bottom: 32px;
+        left: 8px;
+        right: 8px;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+        z-index: 2;
+        pointer-events: none;
+      }
+
+      .mail-carousel-info span {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        padding: 4px 10px;
+        font-size: 11px;
+        font-weight: 500;
+        color: #fff;
+        background: rgba(0, 0, 0, 0.7);
+        border-radius: 4px;
+        backdrop-filter: blur(4px);
+        max-width: 100%;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .mail-carousel-info .carousel-from {
+        background: rgba(59, 130, 246, 0.85);
+      }
+
+      .mail-carousel-info .carousel-for {
+        background: rgba(16, 185, 129, 0.85);
+      }
+
+      .mail-carousel-info svg {
+        flex-shrink: 0;
+        opacity: 0.9;
       }
 
       .mail-carousel-dots {
@@ -4606,192 +4834,208 @@ class HomeDeliveryPanel extends HTMLElement {
 
       /* ======================== Packages ======================== */
 
+      .packages-head {
+        align-items: flex-start;
+        flex-wrap: wrap;
+        margin-bottom: var(--space-3);
+      }
+
+      .packages-toolbar {
+        display: flex;
+        align-items: center;
+        justify-content: flex-end;
+        gap: var(--space-2);
+        flex-wrap: wrap;
+      }
+
+      .pkg-filter {
+        display: inline-flex;
+        align-items: center;
+        padding: 3px;
+        border: 1px solid var(--hd-border);
+        border-radius: 999px;
+        background: rgba(255, 255, 255, 0.03);
+      }
+
+      .pkg-filter-btn {
+        appearance: none;
+        min-height: 36px;
+        padding: 0 14px;
+        border: 0;
+        border-radius: 999px;
+        background: transparent;
+        color: var(--hd-muted);
+        font: inherit;
+        font-size: 12px;
+        font-weight: 600;
+        cursor: pointer;
+        transition: background var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
+      }
+
+      .pkg-filter-btn:hover {
+        color: var(--hd-text);
+      }
+
+      .pkg-filter-btn.is-active {
+        background: var(--hd-accent);
+        color: #fff;
+      }
+
+      .pkg-filter-btn:focus-visible,
+      .pkg-btn:focus-visible,
+      .history-btn:focus-visible {
+        outline: 2px solid var(--hd-accent);
+        outline-offset: 2px;
+      }
+
       .packages-body {
         min-height: 80px;
       }
 
-      .package-grid {
-        display: grid;
-        grid-template-columns: repeat(auto-fill, minmax(min(100%, 340px), 1fr));
-        gap: var(--space-4);
+      .packages-table-wrap {
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+        margin: 0 calc(-1 * var(--space-4));
+        padding: 0 var(--space-4);
       }
 
-      /* Package cards — dark theme, full-width header */
-      .package-card {
-        --label-ink: var(--hd-text);
-        --label-muted: var(--hd-muted);
-        position: relative;
-        overflow: hidden;
-        color: var(--hd-text);
-        background: var(--hd-surface-2);
-        border: 1px solid var(--hd-border);
-        border-radius: var(--radius-md);
-        padding: 0;
-        box-shadow: var(--shadow-md);
-        transition: transform var(--dur-fast) var(--ease), box-shadow var(--dur-fast) var(--ease);
-      }
-
-      .package-card::before {
-        display: none;
-      }
-
-      .package-card:hover {
-        transform: translateY(-2px);
-        box-shadow: var(--shadow-lg);
-      }
-
-      .package-card.out-for-delivery {
-        box-shadow: var(--shadow-md), 0 0 0 1px color-mix(in srgb, #c98500 55%, transparent);
-      }
-
-      .package-card.delivered,
-      .package-card.is-delivered {
-        opacity: 0.92;
-        box-shadow: var(--shadow-md), 0 0 0 1px color-mix(in srgb, #2f8f57 50%, transparent);
-      }
-
-      .package-card.error {
-        box-shadow: var(--shadow-md), 0 0 0 1px color-mix(in srgb, #9e2b2b 55%, transparent);
-      }
-
-      .package-card.needs-details {
-        box-shadow: var(--shadow-md), 0 0 0 1px color-mix(in srgb, #3f9a5f 55%, transparent);
-      }
-
-      .pkg-label {
-        position: relative;
-        z-index: 1;
-        margin: 0;
-        overflow: hidden;
-        border: none;
-        background: transparent;
-        box-shadow: none;
-      }
-
-      .label-header {
-        display: block;
-        border-bottom: 1px solid var(--hd-border);
-      }
-
-      .service-block--full {
-        display: flex;
-        flex-direction: column;
-        justify-content: center;
-        padding: var(--space-3) var(--space-4);
-        min-width: 0;
+      .packages-table {
         width: 100%;
+        min-width: 860px;
+        border-collapse: collapse;
       }
 
-      .service-block strong {
-        font-size: clamp(15px, 2.4vw, 18px);
-        line-height: 1.2;
-        font-weight: 700;
-        letter-spacing: -0.01em;
-        text-transform: none;
-        color: var(--hd-text);
-      }
-
-      .service-block span {
-        margin-top: 4px;
-        color: var(--hd-muted);
-        font-size: 10px;
-        font-weight: 600;
-        letter-spacing: 0.1em;
-        text-transform: uppercase;
-      }
-
-      .label-meta {
+      .packages-table th,
+      .packages-table td {
+        text-align: left;
+        vertical-align: middle;
+        padding: 12px 10px;
         border-bottom: 1px solid var(--hd-border);
       }
 
-      .tracking-summary {
-        padding: var(--space-3) var(--space-4);
-        min-width: 0;
-      }
-
-      .small-label {
-        color: var(--hd-muted);
-        font-size: 8px;
+      .packages-table th {
+        font-size: 11px;
         font-weight: 700;
-        letter-spacing: 0.13em;
+        letter-spacing: 0.08em;
         text-transform: uppercase;
+        color: var(--hd-muted);
+        white-space: nowrap;
       }
 
-      .tracking-number {
-        margin-top: 4px;
-        font-family: "Courier New", ui-monospace, monospace;
-        font-size: 12px;
+      .pkg-row:hover {
+        background: rgba(255, 255, 255, 0.03);
+      }
+
+      .pkg-row.is-delivered {
+        opacity: 0.88;
+      }
+
+      .pkg-address {
+        font-size: 14px;
         font-weight: 700;
-        letter-spacing: 0.02em;
-        word-break: break-all;
+        letter-spacing: -0.02em;
+        line-height: 1.25;
         color: var(--hd-text);
       }
 
-      .address-section {
-        display: grid;
-        grid-template-columns: 48px 1fr;
-        min-height: 118px;
-        border-bottom: 1px solid var(--hd-border);
+      .pkg-recipient {
+        font-size: 13px;
+        color: var(--hd-text);
       }
 
-      .ship-to {
-        display: flex;
-        align-items: flex-start;
-        justify-content: center;
-        padding-top: 14px;
-        border-right: 1px solid var(--hd-border);
-        color: var(--hd-muted);
-        font-size: 10px;
-        font-weight: 700;
-        letter-spacing: 0.1em;
-        text-transform: uppercase;
-        writing-mode: vertical-rl;
-        transform: rotate(180deg);
+      .pkg-recipient.is-empty {
+        color: #5dbe7a;
+        font-style: italic;
       }
 
-      .recipient {
-        padding: 14px var(--space-4) 12px;
-        min-width: 0;
-      }
-
-      .recipient-name {
-        margin: 0;
-        font-size: clamp(20px, 4vw, 24px);
-        font-weight: 800;
-        letter-spacing: -0.03em;
-        text-transform: uppercase;
-        line-height: 1.05;
+      .pkg-tracking {
+        display: block;
+        max-width: 180px;
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
+        font-family: "Courier New", ui-monospace, monospace;
+        font-size: 12px;
+        font-weight: 600;
         color: var(--hd-text);
       }
 
-      .recipient-name.is-empty {
-        color: #5dbe7a;
-        font-style: italic;
-        text-transform: none;
+      .pkg-latest-title {
+        font-size: 13px;
+        font-weight: 600;
+        line-height: 1.3;
+        color: var(--hd-text);
       }
 
-      .recipient-address {
-        margin: 8px 0 0;
-        font-family: "Courier New", ui-monospace, monospace;
-        font-size: 13px;
-        font-weight: 700;
-        line-height: 1.4;
-        text-transform: uppercase;
-        word-break: break-word;
-        color: color-mix(in srgb, var(--hd-text) 88%, var(--hd-muted));
+      .pkg-latest-when {
+        margin-top: 2px;
+        font-size: 12px;
+        color: var(--hd-muted);
+      }
+
+      .pkg-actions {
+        white-space: nowrap;
+      }
+
+      .pkg-btn {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 36px;
+        padding: 0 12px;
+        margin: 0 4px 0 0;
+        border: 1px solid var(--hd-border-strong);
+        border-radius: var(--radius-sm);
+        background: transparent;
+        color: var(--hd-text);
+        font: inherit;
+        font-size: 12px;
+        font-weight: 600;
+        cursor: pointer;
+        transition: background var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease);
+      }
+
+      .pkg-btn:hover:not(:disabled) {
+        background: rgba(255, 255, 255, 0.06);
+      }
+
+      .pkg-btn:disabled {
+        opacity: 0.55;
+        cursor: not-allowed;
+      }
+
+      .pkg-btn-primary {
+        background: var(--hd-accent);
+        border-color: var(--hd-accent);
+        color: #fff;
+      }
+
+      .pkg-btn-primary:hover:not(:disabled) {
+        background: var(--hd-accent-hover);
+        border-color: var(--hd-accent-hover);
+      }
+
+      .pkg-btn-icon {
+        min-width: 36px;
+        padding: 0;
+        margin-right: 0;
+        color: var(--hd-danger);
+        border-color: color-mix(in srgb, var(--hd-danger) 70%, transparent);
+        font-size: 18px;
+        line-height: 1;
+      }
+
+      .pkg-btn-icon:hover:not(:disabled) {
+        background: color-mix(in srgb, var(--hd-danger) 18%, transparent);
       }
 
       .delivery-status {
         display: flex;
         align-items: center;
         gap: 8px;
-        margin-top: 10px;
-        font-size: 10px;
+        font-size: 11px;
         font-weight: 700;
-        letter-spacing: 0.08em;
+        letter-spacing: 0.06em;
         text-transform: uppercase;
         color: var(--hd-text);
       }
@@ -4820,143 +5064,12 @@ class HomeDeliveryPanel extends HTMLElement {
         box-shadow: 0 0 0 3px rgba(158, 43, 43, 0.18);
       }
 
-      .tracking-event {
-        display: grid;
-        grid-template-columns: 92px 1fr;
-        min-height: 84px;
-        border-bottom: 1px solid var(--hd-border);
-      }
-
-      .event-code {
-        display: grid;
-        place-items: center;
-        padding: 10px;
-        border-right: 1px solid var(--hd-border);
-        background: rgba(255, 255, 255, 0.03);
-        text-align: center;
-      }
-
-      .event-code strong {
-        display: block;
-        font-size: 22px;
-        line-height: 1;
-        color: var(--hd-text);
-      }
-
-      .event-code span {
-        display: block;
-        margin-top: 5px;
-        color: var(--hd-muted);
-        font-size: 8px;
-        font-weight: 700;
-        letter-spacing: 0.08em;
-        text-transform: uppercase;
-      }
-
-      .event-details {
-        padding: 11px var(--space-4);
-        min-width: 0;
-      }
-
-      .event-title {
-        margin: 0;
-        font-size: 14px;
-        font-weight: 700;
-        text-transform: uppercase;
-        line-height: 1.2;
-        color: var(--hd-text);
-      }
-
-      .event-meta {
-        margin-top: 6px;
-        color: var(--hd-muted);
-        font-family: "Courier New", ui-monospace, monospace;
-        font-size: 11px;
-        font-weight: 600;
-        line-height: 1.45;
-        word-break: break-word;
-      }
-
-      .event-location {
-        color: var(--hd-text);
-        font-weight: 700;
-        text-transform: uppercase;
-      }
-
-      .label-footer {
-        display: grid;
-        grid-template-columns: 1fr 1fr 44px;
-        gap: 7px;
-        padding: var(--space-3) var(--space-4);
-        background: transparent;
-        border-top: none;
-      }
-
-      .action-button {
-        min-height: 40px;
-        padding: 0 10px;
-        border: 1px solid var(--hd-border-strong);
-        border-radius: var(--radius-sm);
-        background: transparent;
-        color: var(--hd-text);
-        font-size: 11px;
-        font-weight: 700;
-        letter-spacing: 0.04em;
-        text-transform: uppercase;
-        cursor: pointer;
-        transition: transform 130ms ease, background 130ms ease, opacity 130ms ease;
-      }
-
-      .action-button:hover:not(:disabled) {
-        transform: translateY(-1px);
-        background: rgba(255, 255, 255, 0.06);
-      }
-
-      .action-button:disabled {
-        opacity: 0.55;
-        cursor: not-allowed;
-      }
-
-      .action-button.primary {
-        background: var(--hd-accent);
-        border-color: var(--hd-accent);
-        color: #fff;
-      }
-
-      .action-button.primary:hover:not(:disabled) {
-        background: var(--hd-accent-hover);
-        border-color: var(--hd-accent-hover);
-      }
-
-      .action-button.remove {
-        padding: 0;
-        border-color: color-mix(in srgb, var(--hd-danger) 70%, transparent);
-        color: var(--hd-danger);
-        font-size: 20px;
-        line-height: 1;
-        background: transparent;
-      }
-
-      .action-button.remove:hover:not(:disabled) {
-        background: color-mix(in srgb, var(--hd-danger) 18%, transparent);
-        color: var(--hd-danger);
-      }
-
-      .package-card .discover-badge {
-        margin-top: 10px;
-        margin-left: 0;
-        width: fit-content;
-        color: #5dbe7a;
-        background: color-mix(in srgb, #5dbe7a 14%, transparent);
-        border-color: color-mix(in srgb, #5dbe7a 45%, transparent);
-      }
-
       .discover-badge {
         position: relative;
         display: inline-flex;
         align-items: center;
         gap: 6px;
-        margin-left: auto;
+        margin-top: 6px;
         padding: 3px 8px 3px 7px;
         border-radius: 999px;
         font-size: 10px;
@@ -5007,33 +5120,101 @@ class HomeDeliveryPanel extends HTMLElement {
         letter-spacing: 0.02em;
       }
 
-      @media (max-width: 420px) {
-        .pkg-label {
-          margin: 8px;
+      .visually-hidden {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        margin: -1px;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        white-space: nowrap;
+        border: 0;
+      }
+
+      @media (max-width: 768px) {
+        .packages-head {
+          flex-direction: column;
+          align-items: stretch;
         }
 
-        .label-header {
-          grid-template-columns: 88px 1fr 52px;
+        .packages-toolbar {
+          justify-content: space-between;
         }
 
-        .service-block strong {
-          font-size: 12px;
+        .pkg-filter-btn {
+          min-height: 44px;
         }
 
-        .recipient-name {
-          font-size: 20px;
+        .packages-table {
+          min-width: 0;
         }
 
-        .recipient-address {
-          font-size: 12px;
+        .packages-table thead {
+          display: none;
         }
 
-        .tracking-event {
-          grid-template-columns: 78px 1fr;
+        .packages-table,
+        .packages-table tbody,
+        .packages-table tr,
+        .packages-table td {
+          display: block;
+          width: 100%;
         }
 
-        .label-footer {
-          grid-template-columns: 1fr 1fr 40px;
+        .packages-table tr {
+          margin-bottom: var(--space-3);
+          padding: var(--space-3);
+          border: 1px solid var(--hd-border);
+          border-radius: var(--radius-md);
+          background: var(--hd-surface-2);
+        }
+
+        .packages-table td {
+          display: flex;
+          align-items: flex-start;
+          justify-content: space-between;
+          gap: var(--space-3);
+          padding: 8px 0;
+          border-bottom: 1px solid var(--hd-border);
+        }
+
+        .packages-table td:last-child {
+          border-bottom: none;
+          padding-bottom: 0;
+        }
+
+        .packages-table td::before {
+          content: attr(data-label);
+          flex: 0 0 72px;
+          font-size: 11px;
+          font-weight: 700;
+          letter-spacing: 0.06em;
+          text-transform: uppercase;
+          color: var(--hd-muted);
+        }
+
+        .pkg-tracking {
+          max-width: none;
+          white-space: normal;
+          word-break: break-all;
+        }
+
+        .pkg-actions {
+          flex: 1;
+          display: flex;
+          flex-wrap: wrap;
+          justify-content: flex-end;
+          gap: 6px;
+        }
+
+        .pkg-btn {
+          margin: 0;
+          min-height: 44px;
+        }
+
+        .pkg-btn-icon {
+          min-width: 44px;
         }
       }
 
@@ -5126,6 +5307,20 @@ class HomeDeliveryPanel extends HTMLElement {
         max-height: 90vh;
         overflow: auto;
         box-shadow: var(--shadow-lg);
+      }
+
+      .modal--tracking {
+        max-width: 640px;
+      }
+
+      .modal-sub {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-top: 6px;
+        font-size: 13px;
+        color: var(--hd-muted);
+        word-break: break-all;
       }
 
       .modal-header {

@@ -9,7 +9,7 @@ import json
 import logging
 import os
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -31,7 +31,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Code version for deployment verification
-CODE_VERSION = "0.0.25"
+CODE_VERSION = "0.0.26"
 
 app = FastAPI(title="Home Delivery API")
 
@@ -427,6 +427,13 @@ async def get_mail():
                 "gif_filename": a.get("gif_filename"),
                 "gif_url": _mail_image_url(a.get("gif_filename")),
                 "preview_images": _mail_preview_payload(a.get("preview_images")),
+                "letters": [
+                    {
+                        **letter,
+                        "url": _mail_image_url(letter.get("image")) if letter.get("image") else None,
+                    }
+                    for letter in (a.get("letters") or [])
+                ],
             }
             for a in mail_state.get("accounts", [])
         ],
@@ -494,7 +501,10 @@ async def test_imap_connection(request: MailImapTestRequest):
     }
 
 
-async def _backfill_mail_history(accounts: list[dict[str, Any]], days: int = 30) -> int:
+async def _backfill_mail_history(
+    accounts: list[dict[str, Any]],
+    days: int = 30,
+) -> int:
     """Fetch up to N days of Informed Delivery digests into mail history."""
     from mail.informed_delivery import fetch_informed_delivery_history
 
@@ -516,6 +526,112 @@ async def _backfill_mail_history(accounts: list[dict[str, Any]], days: int = 30)
                 exc,
             )
     return day_count
+
+
+def _history_cutoff_date(days: int = 30) -> str:
+    """Return YYYY-MM-DD for the oldest day in a rolling history window."""
+    safe_days = max(1, min(int(days or 30), 30))
+    return (datetime.now(timezone.utc).date() - timedelta(days=safe_days - 1)).isoformat()
+
+
+def _letter_needs_ocr(letter: dict[str, Any]) -> bool:
+    """True when a stored letter image lacks sender/recipient OCR."""
+    if not letter.get("image"):
+        return False
+    return not any(
+        (letter.get(key) or "").strip()
+        for key in ("from_name", "from_address", "to_name", "to_address")
+    )
+
+
+async def _reocr_history_letters(
+    *,
+    days: int = 30,
+    account_id: str | None = None,
+    force: bool = False,
+) -> int:
+    """Re-run OpenOCR on saved history letter images missing party metadata."""
+    from mail.letter_ocr import parse_letter_parties
+
+    history = await config_store.get_mail_history()
+    cutoff = _history_cutoff_date(days)
+    updated = 0
+
+    for date_key in sorted(history.keys(), reverse=True):
+        if date_key < cutoff:
+            continue
+        entry = history[date_key]
+        letters = list(entry.get("letters") or [])
+        changed = False
+
+        for index, letter in enumerate(letters):
+            if account_id and letter.get("account_id") != account_id:
+                continue
+            if not force and not _letter_needs_ocr(letter):
+                continue
+
+            image_name = letter.get("image")
+            if not image_name:
+                continue
+
+            image_path = MAIL_IMAGES_DIR / Path(image_name).name
+            if not image_path.exists():
+                continue
+
+            try:
+                parties = parse_letter_parties(image_path.read_bytes())
+            except Exception as exc:
+                logger.warning("History re-OCR failed for %s: %s", image_name, exc)
+                continue
+
+            letters[index] = {
+                **letter,
+                "from_name": parties.get("from_name") or "",
+                "from_address": parties.get("from_address") or "",
+                "to_name": parties.get("to_name") or "",
+                "to_address": parties.get("to_address") or "",
+            }
+            changed = True
+            updated += 1
+
+        if changed:
+            await config_store.update_mail_history_day_letters(date_key, letters)
+
+    return updated
+
+
+async def _sync_mail_history_window(
+    *,
+    days: int = 30,
+    account_id: str | None = None,
+    force: bool = False,
+) -> dict[str, Any]:
+    """Backfill up to 30 days of mail history and refresh OCR on stored letters."""
+    config = await config_store.load()
+    accounts = [
+        a for a in config.get("mail", {}).get("accounts", [])
+        if a.get("enabled", True)
+        and all([a.get("imap_host"), a.get("imap_user"), a.get("imap_password")])
+    ]
+    if account_id:
+        accounts = [a for a in accounts if a.get("id") == account_id]
+    if not accounts:
+        raise HTTPException(status_code=400, detail="No enabled mail accounts")
+
+    safe_days = max(1, min(int(days or 30), 30))
+    loaded = await _backfill_mail_history(accounts, days=safe_days)
+    reocr_count = await _reocr_history_letters(
+        days=safe_days,
+        account_id=account_id,
+        force=force,
+    )
+    history = await get_mail_history()
+    return {
+        "success": True,
+        "history_days": loaded,
+        "reocr_letters": reocr_count,
+        **history,
+    }
 
 
 async def _sync_mail_accounts(
@@ -577,6 +693,7 @@ async def _sync_mail_accounts(
                 gif_filename=gif_filename,
                 preview_images=preview_images,
                 last_error=None,
+                letters=result.get("letters") or [],
             )
             # Keep today's history day in sync with OCR parties
             try:
@@ -686,11 +803,17 @@ async def refresh_mail():
 
 
 @app.get("/api/mail/history")
-async def get_mail_history():
-    """Return calendar history of Informed Delivery days (last ~30–45 days)."""
+async def get_mail_history(backfill: bool = False, account_id: str | None = None):
+    """Return calendar history of Informed Delivery days (last 30 days)."""
+    if backfill:
+        await _sync_mail_history_window(days=30, account_id=account_id)
+
     history = await config_store.get_mail_history()
+    cutoff = _history_cutoff_date(30)
     days = []
     for date_key in sorted(history.keys(), reverse=True):
+        if date_key < cutoff:
+            continue
         entry = history[date_key]
         letters = []
         for letter in entry.get("letters") or []:
@@ -724,18 +847,13 @@ async def sync_mail_history(request: Request):
         body = {}
 
     days = int(body.get("days") or 30) if isinstance(body, dict) else 30
-    config = await config_store.load()
-    accounts = [
-        a for a in config.get("mail", {}).get("accounts", [])
-        if a.get("enabled", True)
-        and all([a.get("imap_host"), a.get("imap_user"), a.get("imap_password")])
-    ]
-    if not accounts:
-        raise HTTPException(status_code=400, detail="No enabled mail accounts")
-
-    loaded = await _backfill_mail_history(accounts, days=days)
-    history = await get_mail_history()
-    return {"success": True, "history_days": loaded, **history}
+    account_id = body.get("account_id") if isinstance(body, dict) else None
+    force = bool(body.get("force")) if isinstance(body, dict) else False
+    return await _sync_mail_history_window(
+        days=days,
+        account_id=account_id,
+        force=force,
+    )
 
 
 @app.get("/api/mail/image/{filename}")
