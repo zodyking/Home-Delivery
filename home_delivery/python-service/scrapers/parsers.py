@@ -441,3 +441,83 @@ async def parse_estes_tracking(page: Page) -> dict[str, Any]:
 
     logger.info("Estes parsed %s history events (status=%s)", len(events), status or "?")
     return build_tracking_result(events, status, status_detail)
+
+
+_FEDEX_OPEN_DETAILS_JS = """
+() => {
+  const clickable = (node) => node.closest("a, button, [role='button']") || node;
+  const textOf = (node) => (node.innerText || node.textContent || "").replace(/\\s+/g, " ").trim();
+  const nodes = Array.from(document.querySelectorAll("a, button, [role='button'], span"));
+  const details = nodes.find((node) => /view more details/i.test(textOf(node)));
+  if (details) {
+    clickable(details).click();
+    return "details";
+  }
+  if (document.querySelector(".travel-history__scan-event")) return "already";
+  const history = nodes.find((node) => /^travel history$/i.test(textOf(node)));
+  if (history) {
+    clickable(history).click();
+    return "history";
+  }
+  return "none";
+}
+"""
+
+
+async def expand_fedex_details(page: Page) -> None:
+    """Open FedEx "View more details" so the travel-history table is in the DOM."""
+    try:
+        accept = page.get_by_role("button", name=re.compile(r"accept|agree|allow all", re.I))
+        if await accept.count() > 0:
+            await accept.first.click(timeout=1500)
+            await page.wait_for_timeout(250)
+    except Exception:
+        pass
+
+    if await page.locator(".travel-history__scan-event").count() > 0:
+        return
+
+    try:
+        state = await page.evaluate(_FEDEX_OPEN_DETAILS_JS)
+    except Exception as exc:
+        logger.debug("FedEx details click failed: %s", exc)
+        state = "none"
+    logger.debug("FedEx details expand state: %s", state)
+
+    try:
+        await page.wait_for_selector(".travel-history__scan-event, #status", timeout=20000)
+    except Exception:
+        # Some layouts keep history behind a second "Travel history" toggle.
+        try:
+            await page.evaluate(_FEDEX_OPEN_DETAILS_JS)
+            await page.wait_for_timeout(800)
+        except Exception:
+            pass
+
+
+async def parse_fedex_tracking(page: Page, tracking_number: str = "") -> dict[str, Any]:
+    """Click View more details and parse FedEx travel history."""
+    from .fedex_html import parse_fedex_html
+
+    await expand_fedex_details(page)
+    html = await page.content()
+    parsed = parse_fedex_html(html, tracking_number)
+    if parsed.get("error") and not parsed.get("events"):
+        return {
+            "error": parsed["error"],
+            "events": [],
+            "status": parsed.get("status") or "",
+            "status_detail": parsed.get("status_detail") or "",
+        }
+
+    events = parsed.get("events") or []
+    logger.info(
+        "FedEx parsed %s history events (status=%s)",
+        len(events),
+        parsed.get("status") or "?",
+    )
+    return build_tracking_result(
+        events,
+        parsed.get("status") or "",
+        parsed.get("status_detail") or "",
+    )

@@ -5,12 +5,15 @@ Ported from Mail-And-Packages integration.
 from __future__ import annotations
 
 import base64
+import calendar
 import email
 import imaplib
 import logging
+import os
 import re
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
+from email.header import decode_header, make_header
 from email.message import Message
 from email.utils import parsedate_to_datetime
 from pathlib import Path
@@ -82,6 +85,38 @@ USPS_TRACKING_RE = re.compile(r"\b(9\d{19,25}|[A-Z]{2}\d{9}US)\b", re.IGNORECASE
 UPS_TRACKING_RE = re.compile(r"\b(1Z[A-Z0-9]{16})\b", re.IGNORECASE)
 TRACKING_LABEL_RE = re.compile(
     r"[?&](?:tLabels|qtc_tLabels|tracknum|trknbr)=([0-9A-Za-z]{10,34})",
+    re.IGNORECASE,
+)
+
+# Subjects that are an Informed Delivery digest (substring, case-insensitive).
+_DIGEST_SUBJECT_RE = re.compile(
+    r"daily digest|informed delivery|coming to you|mailbox soon",
+    re.IGNORECASE,
+)
+# USPS subjects use short weekdays ("Thu, Nov 26"), not only "Thursday".
+_WEEKDAY_RE = (
+    r"(?:Mon(?:day)?|Tue(?:s(?:day)?)?|Wed(?:nes(?:day)?)?|"
+    r"Thu(?:r(?:s(?:day)?)?)?|Fri(?:day)?|Sat(?:urday)?|Sun(?:day)?)"
+)
+_MONTH_RE = r"(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*"
+# "Your Daily Digest for Sat, 11/21" or "... 11/21/2026"
+DIGEST_SUBJECT_MDY_RE = re.compile(
+    rf"Daily Digest(?:\s+for)?\s+{_WEEKDAY_RE},?\s+(\d{{1,2}})/(\d{{1,2}})(?:/(\d{{2,4}}))?",
+    re.IGNORECASE,
+)
+# "Your Daily Digest for Sat, Nov 21" or "... November 26, 2026"
+DIGEST_SUBJECT_MONTH_RE = re.compile(
+    rf"Daily Digest(?:\s+for)?\s+{_WEEKDAY_RE},?\s+({_MONTH_RE})\.?\s+"
+    rf"(\d{{1,2}})(?:st|nd|rd|th)?(?:,?\s+(\d{{4}}))?",
+    re.IGNORECASE,
+)
+BODY_DELIVERIES_RE = re.compile(
+    r"Today'?s Deliveries:\s*(\d{1,2})/(\d{1,2})/(\d{2,4})",
+    re.IGNORECASE,
+)
+BODY_LONG_DATE_RE = re.compile(
+    rf"\b{_WEEKDAY_RE},?\s+(?:(\d{{1,2}})(?:st|nd|rd|th)?\s+({_MONTH_RE})\.?|"
+    rf"({_MONTH_RE})\.?\s+(\d{{1,2}})(?:st|nd|rd|th)?)(?:,?\s+(\d{{4}}))?",
     re.IGNORECASE,
 )
 
@@ -211,7 +246,7 @@ def _select_mailpiece_images(
     # Prefer letter scans, then any remaining non-promo images.
     ordered = letter_like + other
     if mailpiece_count is None:
-        return _image_payloads(ordered)
+        return ordered
 
     if len(ordered) > mailpiece_count:
         logger.info(
@@ -230,7 +265,48 @@ def _select_mailpiece_images(
             ordered = ordered[-mailpiece_count:]
         ordered = ordered[:mailpiece_count]
 
-    return _image_payloads(ordered)
+    return ordered
+
+
+def _image_bytes(image: dict[str, Any] | bytes) -> bytes:
+    if isinstance(image, dict):
+        return image.get("bytes") or b""
+    return image or b""
+
+
+def _sender_hint_for_image(html: str, name: str) -> str:
+    """
+    Sender printed next to a mailpiece image.
+
+    Campaign FROM labels sit on the ad image that follows them. A letter scan
+    only inherits a FROM label when no other image is between the label and
+    this scan.
+    """
+    if not html or not name:
+        return ""
+    haystack = html.lower()
+    idx = haystack.find(name.lower())
+    if idx < 0:
+        return ""
+    window = html[max(0, idx - 1200) : idx]
+    from_at = window.lower().rfind("from:")
+    if from_at < 0:
+        from_at = window.lower().rfind(">from<")
+    if from_at < 0:
+        return ""
+    between = window[from_at:]
+    if re.search(r"<img\b", between, flags=re.IGNORECASE):
+        return ""
+    text = _html_to_text(between)
+    match = re.search(r"\bFROM:?\s+(.+)$", text, flags=re.IGNORECASE)
+    if not match:
+        return ""
+    candidate = match.group(1).strip(" :-")
+    if not candidate or len(candidate) > 80:
+        return ""
+    if re.search(r"mailpiece|campaign|informed delivery", candidate, flags=re.IGNORECASE):
+        return ""
+    return candidate
 
 
 def _strip_promo_html_sections(html: str) -> str:
@@ -645,22 +721,172 @@ def _select_mailbox(imap: imaplib.IMAP4_SSL, folder: str) -> str:
     raise ValueError(f"Failed to select mailbox '{folder}': {last_error}")
 
 
-def _message_delivery_date(msg: Message) -> str:
-    """Return YYYY-MM-DD for an Informed Delivery message (local date)."""
-    raw = msg.get("Date")
-    if raw:
+def _header_text(value: Any) -> str:
+    """Decode an RFC 2047 header into a plain string."""
+    if not value:
+        return ""
+    try:
+        return str(make_header(decode_header(str(value))))
+    except Exception:
+        return str(value)
+
+
+def _local_today() -> date:
+    """Calendar day for the household. Uses TZ when Home Assistant sets it."""
+    tz_name = (os.environ.get("TZ") or "").strip()
+    if tz_name:
         try:
-            dt = parsedate_to_datetime(raw)
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
-            return dt.astimezone().date().isoformat()
+            from zoneinfo import ZoneInfo
+
+            return datetime.now(ZoneInfo(tz_name)).date()
         except Exception:
             pass
-    return datetime.now().date().isoformat()
+    return datetime.now().astimezone().date()
+
+
+def _safe_date(year: int, month: int, day: int) -> date | None:
+    try:
+        return date(int(year), int(month), int(day))
+    except (TypeError, ValueError):
+        return None
+
+
+def _month_number(name: str) -> int | None:
+    key = (name or "").strip(".").lower()[:3]
+    for index, abbr in enumerate(calendar.month_abbr):
+        if abbr and abbr.lower() == key:
+            return index
+    return None
+
+
+def _infer_year(month: int, day: int, anchor: date) -> date | None:
+    """Pick the year that lands on the digest day, not the following UTC day."""
+    candidates: list[date] = []
+    for year in (anchor.year - 1, anchor.year, anchor.year + 1):
+        parsed = _safe_date(year, month, day)
+        if parsed:
+            candidates.append(parsed)
+    if not candidates:
+        return None
+
+    def _rank(value: date) -> tuple[int, int]:
+        delta = (value - anchor).days
+        # USPS often sends the digest the evening before the delivery day.
+        close = 0 if -1 <= delta <= 2 else 50 + abs(delta)
+        return (close, abs(delta))
+
+    return min(candidates, key=_rank)
+
+
+def _header_civil_date(msg: Message) -> date | None:
+    """
+    Date written on the message, in the offset the sender used.
+
+    Converting that instant to the container clock (usually UTC) moves a
+    late-evening US digest onto the next calendar day for every address.
+    """
+    raw = _header_text(msg.get("Date"))
+    if not raw:
+        return None
+    raw = re.sub(r"\s*\([^)]*\)\s*$", "", raw).strip()
+    try:
+        return parsedate_to_datetime(raw).date()
+    except Exception:
+        return None
+
+
+def _date_from_digest_text(subject: str, body_head: str, anchor: date) -> date | None:
+    """Prefer the delivery day USPS prints over the SMTP timestamp."""
+    deliveries = BODY_DELIVERIES_RE.search(f"{subject}\n{body_head}")
+    if deliveries:
+        month, day, year = deliveries.groups()
+        year_n = int(year)
+        if year_n < 100:
+            year_n += 2000
+        parsed = _safe_date(year_n, int(month), int(day))
+        if parsed:
+            return parsed
+
+    numeric = DIGEST_SUBJECT_MDY_RE.search(subject)
+    if numeric:
+        month, day, year = numeric.groups()
+        if year:
+            year_n = int(year)
+            if year_n < 100:
+                year_n += 2000
+            parsed = _safe_date(year_n, int(month), int(day))
+        else:
+            parsed = _infer_year(int(month), int(day), anchor)
+        if parsed:
+            return parsed
+
+    named = DIGEST_SUBJECT_MONTH_RE.search(subject)
+    if named:
+        month_name, day, year = named.groups()
+        month = _month_number(month_name)
+        if month:
+            parsed = (
+                _safe_date(int(year), month, int(day))
+                if year
+                else _infer_year(month, int(day), anchor)
+            )
+            if parsed:
+                return parsed
+
+    long_body = BODY_LONG_DATE_RE.search(body_head)
+    if long_body:
+        day_a, month_a, month_b, day_b, year = long_body.groups()
+        if day_a and month_a:
+            day, month_name = day_a, month_a
+        else:
+            day, month_name = day_b, month_b
+        month = _month_number(month_name or "")
+        if month and day:
+            parsed = (
+                _safe_date(int(year), month, int(day))
+                if year
+                else _infer_year(month, int(day), anchor)
+            )
+            if parsed:
+                return parsed
+
+    for match in re.finditer(r"\b(\d{1,2})/(\d{1,2})/(\d{4})\b", body_head):
+        parsed = _safe_date(int(match.group(3)), int(match.group(1)), int(match.group(2)))
+        if parsed and abs((parsed - anchor).days) <= 14:
+            return parsed
+    return None
+
+
+def message_delivery_date(msg: Message) -> str:
+    """YYYY-MM-DD of the mail day this digest is for."""
+    anchor = _header_civil_date(msg) or _local_today()
+    subject = _header_text(msg.get("Subject"))
+    html = _get_message_html(msg)
+    body_head = _html_to_text(html)[:2500] if html else ""
+    parsed = _date_from_digest_text(subject, body_head, anchor)
+    return (parsed or anchor).isoformat()
+
+
+def _message_delivery_date(msg: Message) -> str:
+    """Return YYYY-MM-DD for an Informed Delivery message."""
+    return message_delivery_date(msg)
+
+
+def _is_digest_message(msg: Message) -> bool:
+    """True for an Informed Delivery digest, including forwarded copies."""
+    subject = _header_text(msg.get("Subject"))
+    if _DIGEST_SUBJECT_RE.search(subject):
+        return True
+    sender = _header_text(msg.get("From")).lower()
+    if any(known.lower() in sender for known in USPS_SENDERS):
+        html = _get_message_html(msg).lower()
+        if any(token in html for token in ("mailpiece", "informed delivery", "daily digest")):
+            return True
+    return False
 
 
 def _process_informed_delivery_message(msg: Message) -> dict[str, Any]:
-    """Parse counts, tracking numbers, and letter-scan image bytes from one digest."""
+    """Parse counts, tracking numbers, and letter-scan images from one digest."""
     digest = _parse_delivery_digest(msg)
     extracted = _extract_images_from_message(msg)
 
@@ -672,6 +898,11 @@ def _process_informed_delivery_message(msg: Message) -> dict[str, Any]:
             mailpiece_count = 0
 
     images = _select_mailpiece_images(extracted, mailpiece_count)
+    html = _get_message_html(msg)
+    for image in images:
+        hint = _sender_hint_for_image(html, str(image.get("name") or ""))
+        if hint:
+            image["from_name"] = hint
     package_count = digest.get("package_count") or 0
     tracking_numbers = digest.get("tracking_numbers") or []
 
@@ -721,24 +952,49 @@ def _imap_search(
     *,
     ignore_sender: bool = False,
 ) -> list[bytes]:
-    search_query = _build_search_query(
-        USPS_SENDERS,
-        INFORMED_DELIVERY_SUBJECTS,
-        since_date,
-        ignore_sender=ignore_sender,
-    )
-    try:
-        status, data = imap.search("UTF-8", search_query)
-    except Exception:
-        status, data = imap.search(None, search_query)
+    """
+    Find Informed Delivery messages on or after since_date.
 
-    if status != "OK":
-        detail = data[0].decode("utf-8", errors="replace") if data and data[0] else "search failed"
-        raise ValueError(f"IMAP search failed: {detail}")
+    Gmail's IMAP server drops or truncates nested OR queries (often down to a
+    single recent hit). Search each sender, and the digest subject, with a
+    plain SINCE key and union the ids.
+    """
+    if ignore_sender:
+        queries = [
+            f'(SINCE {since_date} SUBJECT "Digest")',
+            f'(SINCE {since_date} SUBJECT "Informed Delivery")',
+        ]
+    else:
+        queries = [f'(FROM "{sender}" SINCE {since_date})' for sender in USPS_SENDERS]
+        queries.append(f'(SUBJECT "Daily Digest" SINCE {since_date})')
 
-    if not data or not data[0]:
-        return []
-    return data[0].split()
+    found: list[bytes] = []
+    seen: set[bytes] = set()
+    any_ok = False
+    last_error = "search failed"
+    for query in queries:
+        try:
+            status, data = imap.search(None, query)
+        except Exception as exc:
+            last_error = str(exc)
+            logger.debug("IMAP search failed for %s: %s", query, exc)
+            continue
+        if status != "OK":
+            detail = data[0].decode("utf-8", errors="replace") if data and data[0] else "search failed"
+            last_error = detail
+            continue
+        any_ok = True
+        if not data or not data[0]:
+            continue
+        for email_id in data[0].split():
+            if email_id in seen:
+                continue
+            seen.add(email_id)
+            found.append(email_id)
+
+    if not any_ok:
+        raise ValueError(f"IMAP search failed: {last_error}")
+    return found
 
 
 def _fetch_message(imap: imaplib.IMAP4_SSL, email_id: bytes) -> Message | None:
@@ -749,10 +1005,22 @@ def _fetch_message(imap: imaplib.IMAP4_SSL, email_id: bytes) -> Message | None:
     return email.message_from_bytes(raw_email)
 
 
+def _known_recipient(mail_config: dict[str, Any] | None) -> str:
+    """Street label of the mail account, used when the envelope read misses it."""
+    if not mail_config:
+        return ""
+    label = str(mail_config.get("label") or "").strip()
+    if not label or "@" in label:
+        return ""
+    return label
+
+
 async def _save_history_letter_images(
     account_key: str,
     day: str,
-    images: list[bytes],
+    images: list[Any],
+    *,
+    known_recipient: str = "",
 ) -> list[dict[str, Any]]:
     """Save letter images for a history day and OCR from/to parties."""
     from mail.letter_ocr import parse_letter_parties
@@ -769,11 +1037,19 @@ async def _save_history_letter_images(
     except Exception as cleanup_exc:
         logger.debug("History image cleanup skipped: %s", cleanup_exc)
 
-    for index, img_bytes in enumerate(images):
+    for index, image in enumerate(images):
+        img_bytes = _image_bytes(image)
         if not img_bytes:
             continue
+        hint = {}
+        if isinstance(image, dict) and image.get("from_name"):
+            hint["from_name"] = image["from_name"]
         try:
-            parties = parse_letter_parties(img_bytes)
+            parties = parse_letter_parties(
+                img_bytes,
+                known_recipient=known_recipient,
+                hint=hint or None,
+            )
             preview_bytes = prepare_preview_bytes(img_bytes)
             filename = f"{prefix}{index}_{uuid.uuid4().hex[:6]}.jpg"
             output_path = MAIL_IMAGES_DIR / filename
@@ -817,10 +1093,26 @@ async def check_informed_delivery(mail_config: dict[str, Any]) -> dict[str, Any]
 
     ignore_sender = _should_ignore_sender(mail_config)
 
+    def _empty_today() -> dict[str, Any]:
+        return {
+            "piece_count": 0,
+            "mailpiece_count": 0,
+            "package_count": 0,
+            "gif_filename": None,
+            "preview_images": [],
+            "tracking_numbers": [],
+            "section_counts": {},
+            "date": _local_today().isoformat(),
+            "letters": [],
+        }
+
     try:
+        # Look back one day so a UTC container still sees a digest stamped
+        # with the household's previous evening offset.
+        since = (_local_today() - timedelta(days=1)).strftime("%d-%b-%Y")
         email_ids = _imap_search(
             imap,
-            _get_today_imap_date(),
+            since,
             ignore_sender=ignore_sender,
         )
         logger.debug(
@@ -830,36 +1122,25 @@ async def check_informed_delivery(mail_config: dict[str, Any]) -> dict[str, Any]
             ignore_sender,
         )
 
-        if not email_ids:
+        parsed_rows: list[dict[str, Any]] = []
+        for email_id in email_ids:
+            msg = _fetch_message(imap, email_id)
+            if not msg or not _is_digest_message(msg):
+                continue
+            parsed_rows.append(_process_informed_delivery_message(msg))
+
+        today_key = _local_today().isoformat()
+        yesterday_key = (_local_today() - timedelta(days=1)).isoformat()
+        todays = [row for row in parsed_rows if row["date"] == today_key]
+        if todays:
+            parsed = max(todays, key=lambda row: len(row["images"]))
+        else:
+            yesterdays = [row for row in parsed_rows if row["date"] == yesterday_key]
+            parsed = max(yesterdays, key=lambda row: len(row["images"])) if yesterdays else None
+
+        if not parsed:
             logger.info("No Informed Delivery email found for today")
-            return {
-                "piece_count": 0,
-                "mailpiece_count": 0,
-                "package_count": 0,
-                "gif_filename": None,
-                "preview_images": [],
-                "tracking_numbers": [],
-                "section_counts": {},
-                "date": datetime.now().date().isoformat(),
-                "letters": [],
-            }
-
-        msg = _fetch_message(imap, email_ids[-1])
-        if not msg:
-            logger.warning("Failed to fetch email")
-            return {
-                "piece_count": 0,
-                "mailpiece_count": 0,
-                "package_count": 0,
-                "gif_filename": None,
-                "preview_images": [],
-                "tracking_numbers": [],
-                "section_counts": {},
-                "date": datetime.now().date().isoformat(),
-                "letters": [],
-            }
-
-        parsed = _process_informed_delivery_message(msg)
+            return _empty_today()
         logger.info(
             "Parsed Informed Delivery: %s mailpiece(s), %s Expected Today package(s), "
             "%s tracking number(s) discovered, %s preview image(s)",
@@ -880,8 +1161,16 @@ async def check_informed_delivery(mail_config: dict[str, Any]) -> dict[str, Any]
 
         letters = []
         account_key = mail_config.get("id", "mail")
-        for index, img_bytes in enumerate(parsed["images"]):
-            parties = parse_letter_parties(img_bytes)
+        recipient = _known_recipient(mail_config)
+        for index, image in enumerate(parsed["images"]):
+            hint = {}
+            if isinstance(image, dict) and image.get("from_name"):
+                hint["from_name"] = image["from_name"]
+            parties = parse_letter_parties(
+                _image_bytes(image),
+                known_recipient=recipient,
+                hint=hint or None,
+            )
             letters.append({
                 "image": preview_images[index] if index < len(preview_images) else "",
                 "account_id": account_key,
@@ -922,10 +1211,11 @@ async def fetch_informed_delivery_history(
     """
     Fetch Informed Delivery digests for the last N days and build history days.
 
-    Returns one entry per calendar day (latest digest wins if multiples exist).
+    Returns one entry per calendar day. When a day has two digests, the one
+    with more mail-piece images is kept.
     """
     days = max(1, min(int(days or 30), 30))
-    since = (datetime.now() - timedelta(days=days - 1)).strftime("%d-%b-%Y")
+    since = (_local_today() - timedelta(days=days - 1)).strftime("%d-%b-%Y")
     logger.info(
         "Fetching Informed Delivery history (%s days) for %s since %s",
         days,
@@ -945,20 +1235,25 @@ async def fetch_informed_delivery_history(
 
         for email_id in email_ids:
             msg = _fetch_message(imap, email_id)
-            if not msg:
+            if not msg or not _is_digest_message(msg):
                 continue
             parsed = _process_informed_delivery_message(msg)
             day = parsed["date"]
-            # Keep the latest message for each day (IDs are chronological)
-            by_date[day] = parsed
+            # Keep the digest that actually has the letter scans when a
+            # later notice for the same mail day has none.
+            existing = by_date.get(day)
+            if existing is None or len(parsed["images"]) >= len(existing["images"]):
+                by_date[day] = parsed
 
         history_days: list[dict[str, Any]] = []
+        recipient = _known_recipient(mail_config)
         for day in sorted(by_date.keys()):
             parsed = by_date[day]
             letters = await _save_history_letter_images(
                 mail_config.get("id", "mail"),
                 day,
                 parsed["images"],
+                known_recipient=recipient,
             )
             history_days.append({
                 "date": day,
@@ -1011,7 +1306,8 @@ async def _save_mail_previews(
     """
     _delete_mail_files(previous_files)
 
-    real_images = [img for img in images if img]
+    real_images = [_image_bytes(img) for img in images]
+    real_images = [img for img in real_images if img]
     if not real_images:
         return [], None
 

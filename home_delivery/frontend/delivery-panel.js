@@ -770,6 +770,7 @@ class HomeDeliveryPanel extends HTMLElement {
     return [
       { id: "estes", label: "Estes Express" },
       { id: "ups", label: "UPS" },
+      { id: "fedex", label: "FedEx" },
       { id: "usps", label: "USPS" },
     ];
   }
@@ -2956,7 +2957,7 @@ class HomeDeliveryPanel extends HTMLElement {
         <div class="form-group">
           <label for="wizard-tracking">Tracking Number *</label>
           <input type="text" id="wizard-tracking" required
-            placeholder="e.g., 1ZA92T380303849608 or 103-8067337"
+            placeholder="e.g., 1ZA92T380303849608, 385324740657, or 103-8067337"
             value="${this._esc(wiz.tracking || "")}" />
           <p class="hint">Pick the carrier first — tracking starts immediately when you add the package.</p>
         </div>

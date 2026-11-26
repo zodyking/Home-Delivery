@@ -519,6 +519,13 @@ async def _backfill_mail_history(
             if history_days:
                 await config_store.replace_mail_history(history_days)
                 day_count += len(history_days)
+            account_id = account.get("id")
+            if account_id:
+                await config_store.forget_account_history_dates(
+                    str(account_id),
+                    keep_dates={str(day.get("date") or "") for day in history_days},
+                    oldest=_history_cutoff_date(days),
+                )
         except Exception as exc:
             logger.warning(
                 "Mail history backfill failed for %s: %s",
@@ -530,8 +537,10 @@ async def _backfill_mail_history(
 
 def _history_cutoff_date(days: int = 30) -> str:
     """Return YYYY-MM-DD for the oldest day in a rolling history window."""
+    from mail.informed_delivery import _local_today
+
     safe_days = max(1, min(int(days or 30), 30))
-    return (datetime.now(timezone.utc).date() - timedelta(days=safe_days - 1)).isoformat()
+    return (_local_today() - timedelta(days=safe_days - 1)).isoformat()
 
 
 def _letter_needs_ocr(letter: dict[str, Any]) -> bool:
@@ -550,12 +559,17 @@ async def _reocr_history_letters(
     account_id: str | None = None,
     force: bool = False,
 ) -> int:
-    """Re-run OpenOCR on saved history letter images missing party metadata."""
+    """Re-run letter OCR on saved history images that are missing sender or recipient."""
     from mail.letter_ocr import parse_letter_parties
 
     history = await config_store.get_mail_history()
     cutoff = _history_cutoff_date(days)
     updated = 0
+    config = await config_store.load()
+    accounts = {
+        account.get("id"): account
+        for account in config.get("mail", {}).get("accounts", [])
+    }
 
     for date_key in sorted(history.keys(), reverse=True):
         if date_key < cutoff:
@@ -579,7 +593,13 @@ async def _reocr_history_letters(
                 continue
 
             try:
-                parties = parse_letter_parties(image_path.read_bytes())
+                account = accounts.get(letter.get("account_id")) or {}
+                label = str(account.get("label") or "").strip()
+                known = "" if not label or "@" in label else label
+                parties = parse_letter_parties(
+                    image_path.read_bytes(),
+                    known_recipient=known,
+                )
             except Exception as exc:
                 logger.warning("History re-OCR failed for %s: %s", image_name, exc)
                 continue

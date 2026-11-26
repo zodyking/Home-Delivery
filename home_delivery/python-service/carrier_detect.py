@@ -12,12 +12,12 @@ from typing import Literal
 
 CarrierType = Literal["usps", "ups", "fedex", "estes"]
 
-# Full carrier list (FedEx reserved until implemented).
+# Full carrier list.
 CARRIERS: list[CarrierType] = ["estes", "ups", "fedex", "usps"]
-# Scrapers that are actually implemented today.
-IMPLEMENTED_CARRIERS: list[CarrierType] = ["estes", "ups", "usps"]
-# Ambiguous auto-detect order: Estes → UPS → USPS last (Akamai-fragile).
-AUTO_DETECT_ORDER: list[CarrierType] = ["estes", "ups", "usps"]
+# Scrapers that return real tracking events.
+IMPLEMENTED_CARRIERS: list[CarrierType] = ["estes", "ups", "fedex", "usps"]
+# Ambiguous auto-detect order. USPS is last because its page is Akamai-fragile.
+AUTO_DETECT_ORDER: list[CarrierType] = ["estes", "ups", "fedex", "usps"]
 
 # Tracking URL templates (user-provided link logic)
 TRACKING_URLS: dict[CarrierType, str] = {
@@ -108,7 +108,7 @@ def auto_detect_carrier_order(tracking_number: str) -> list[CarrierType]:
     try their matching carrier — never fall through to an unrelated carrier
     and surface e.g. "Estes tracking content not found" for a UPS number.
 
-    Ambiguous numbers use Estes → UPS → USPS (FedEx skipped until implemented).
+    Ambiguous numbers use Estes → UPS → FedEx → USPS.
     """
     cleaned = normalize_tracking_number(tracking_number)
     hinted = infer_carrier_from_format(cleaned)
@@ -119,9 +119,7 @@ def auto_detect_carrier_order(tracking_number: str) -> list[CarrierType]:
         return ["estes"]
     if hinted == "usps":
         return ["usps"]
-    # FedEx not implemented — fall through to ambiguous order rather than
-    # returning a stub-only list.
     if hinted == "fedex":
-        return list(AUTO_DETECT_ORDER)
+        return ["fedex"]
 
     return list(AUTO_DETECT_ORDER)

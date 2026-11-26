@@ -24,10 +24,16 @@ from .navigation import (
     goto_tracking_page,
     prepare_ups_tracking_page,
     wait_for_estes_tracking,
+    wait_for_fedex_tracking,
     wait_for_ups_tracking,
     wait_for_usps_tracking,
 )
-from .parsers import parse_estes_tracking, parse_ups_tracking, parse_usps_tracking
+from .parsers import (
+    parse_estes_tracking,
+    parse_fedex_tracking,
+    parse_ups_tracking,
+    parse_usps_tracking,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +42,7 @@ CARRIER_FETCH_TIMEOUTS: dict[str, float] = {
     "ups": 90.0,
     "usps": 180.0,
     "estes": 75.0,
+    "fedex": 120.0,
 }
 
 UPS_WAIT_MS = 45000
@@ -109,9 +116,17 @@ async def _fetch_ups(page, tracking_number: str) -> dict[str, Any]:
 
 
 async def _fetch_fedex(page, tracking_number: str) -> dict[str, Any]:
-    """Fetch FedEx tracking data from a ready page (stub for now)."""
-    _ = page, tracking_number
-    return {"error": "FedEx scraping not yet implemented"}
+    """Open the FedEx tracking URL and read the detailed travel history."""
+    url = get_tracking_url("fedex", tracking_number)
+    await goto_tracking_page(page, url, timeout_ms=60000)
+
+    if not await wait_for_fedex_tracking(page, tracking_number, timeout_ms=35000):
+        content = (await page.content()).lower()
+        if "access denied" in content or "errors.edgesuite.net" in content:
+            return {"error": "FedEx blocked automated access"}
+        return {"error": "FedEx tracking content not found"}
+
+    return await parse_fedex_tracking(page, tracking_number)
 
 
 async def _fetch_estes(page, tracking_number: str) -> dict[str, Any]:
@@ -152,10 +167,6 @@ async def _fetch_carrier_tracking_impl(
 
     logger.info("Fetching %s tracking for %s", carrier.upper(), normalized)
 
-    # Don't launch a browser for unimplemented carriers (FedEx stub).
-    if carrier == "fedex":
-        return await fetch_fn(None, normalized)
-
     async def _do_fetch() -> dict[str, Any]:
         page_timeout_ms = UPS_PAGE_TIMEOUT_MS if carrier == "ups" else 70000
         async with get_page(timeout_ms=page_timeout_ms) as page:
@@ -189,7 +200,7 @@ async def _fetch_carrier_tracking_impl(
     # USPS (and occasionally UPS) can stick on a cold Akamai/browser state —
     # one full browser reset often clears it in Home Assistant containers.
     if (
-        carrier in ("usps", "ups")
+        carrier in ("usps", "ups", "fedex")
         and _needs_browser_retry(result)
         and not (result.get("events") or [])
     ):

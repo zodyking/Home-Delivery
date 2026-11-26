@@ -429,16 +429,41 @@ async def wait_for_ups_tracking(
         return False
 
 
-async def wait_for_fedex_tracking(page: Page, timeout_ms: int = 25000) -> bool:
-    """Wait for FedEx tracking UI elements."""
-    try:
-        await page.wait_for_selector(
-            "[class*='shipmentStatus'], [class*='tracking-status'], [class*='travel-history']",
-            timeout=timeout_ms,
-        )
-        return True
-    except Exception:
-        return False
+async def wait_for_fedex_tracking(
+    page: Page,
+    tracking_number: str = "",
+    timeout_ms: int = 25000,
+) -> bool:
+    """
+    Wait until the FedEx summary card or the detailed travel history is visible.
+
+    The summary card exposes "View more details". Scan rows exist only after
+    that control is opened.
+    """
+    import re
+
+    deadline = time.monotonic() + (timeout_ms / 1000)
+    number = re.sub(r"[\s\-]", "", tracking_number or "")
+    while time.monotonic() < deadline:
+        try:
+            if await page.locator(".travel-history__scan-event").count() > 0:
+                return True
+            if await page.get_by_text(re.compile(r"view more details", re.I)).count() > 0:
+                return True
+            heading = page.get_by_text(
+                re.compile(r"^(Arriving|Delivered|Out for delivery|Label created)\b", re.I)
+            )
+            if await heading.count() > 0:
+                return True
+            if number:
+                # Tracking id in the detailed title bar, e.g. "Tracking ID: 385…"
+                titled = page.get_by_text(re.compile(rf"Tracking ID:\s*{re.escape(number)}", re.I))
+                if await titled.count() > 0:
+                    return True
+        except Exception:
+            pass
+        await page.wait_for_timeout(400)
+    return False
 
 
 async def dismiss_estes_overlays(page: Page) -> None:

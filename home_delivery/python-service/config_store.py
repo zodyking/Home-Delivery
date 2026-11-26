@@ -420,9 +420,13 @@ class ConfigStore:
         """Drop history entries older than max_days (by date key)."""
         if not history or max_days <= 0:
             return
-        cutoff = (
-            datetime.now(timezone.utc).date() - timedelta(days=max_days - 1)
-        ).isoformat()
+        try:
+            from mail.informed_delivery import _local_today
+
+            today = _local_today()
+        except Exception:
+            today = datetime.now(timezone.utc).date()
+        cutoff = (today - timedelta(days=max_days - 1)).isoformat()
         for old_key in list(history.keys()):
             if old_key < cutoff:
                 history.pop(old_key, None)
@@ -458,6 +462,77 @@ class ConfigStore:
         for day in days:
             await self.upsert_mail_history_day(day)
         return await self.get_mail_history()
+
+    async def forget_account_history_dates(
+        self,
+        account_id: str,
+        *,
+        keep_dates: set[str],
+        oldest: str,
+    ) -> None:
+        """
+        Drop one account from history days inside the sync window that this
+        sync did not return.
+
+        A previous bug stored every digest under a single date. Re-syncing
+        writes the real days, and this removes that account's leftover day
+        so the calendar does not keep the old entry.
+        """
+        if not account_id or not oldest:
+            return
+        if self._config is None:
+            await self.load()
+
+        async with self._lock:
+            mail = self._config.setdefault("mail", {"accounts": [], "history": {}})
+            history = mail.setdefault("history", {})
+            if not isinstance(history, dict):
+                return
+
+            changed = False
+            for date_key in list(history.keys()):
+                if date_key < oldest or date_key in keep_dates:
+                    continue
+                entry = history.get(date_key) or {}
+                letters = [
+                    letter
+                    for letter in (entry.get("letters") or [])
+                    if letter.get("account_id") != account_id
+                ]
+                by_account = {
+                    key: value
+                    for key, value in (entry.get("by_account") or {}).items()
+                    if key != account_id
+                }
+                had_account = (
+                    any(letter.get("account_id") == account_id for letter in (entry.get("letters") or []))
+                    or account_id in (entry.get("by_account") or {})
+                )
+                if not had_account:
+                    continue
+                if not letters and not by_account:
+                    history.pop(date_key, None)
+                    changed = True
+                    continue
+
+                mailpiece_count = sum(int(value.get("mailpiece_count") or 0) for value in by_account.values())
+                package_count = sum(int(value.get("package_count") or 0) for value in by_account.values())
+                history[date_key] = {
+                    **entry,
+                    "letters": letters,
+                    "preview_images": [
+                        letter.get("image") for letter in letters if letter.get("image")
+                    ],
+                    "mailpiece_count": mailpiece_count,
+                    "package_count": package_count,
+                    "piece_count": mailpiece_count + package_count,
+                    "by_account": by_account,
+                    "account_ids": sorted(by_account.keys()),
+                }
+                changed = True
+
+            if changed:
+                await self._save_locked()
 
 
 # Global singleton

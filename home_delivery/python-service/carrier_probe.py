@@ -27,6 +27,7 @@ from scrapers.navigation import (
     goto_tracking_page,
     prepare_estes_tracking_page,
     wait_for_estes_tracking,
+    wait_for_fedex_tracking,
 )
 
 logger = logging.getLogger(__name__)
@@ -212,6 +213,32 @@ async def _probe_ups_browser(page, tracking_number: str) -> bool:
         return False
 
 
+async def _probe_fedex_browser(page, tracking_number: str) -> bool:
+    """Confirm a FedEx number by the summary card or detailed travel history."""
+    url = get_tracking_url("fedex", tracking_number)
+    logger.debug("Probing FedEx link: %s", url)
+    try:
+        await goto_tracking_page(page, url, timeout_ms=PROBE_TIMEOUT_MS)
+        if not await wait_for_fedex_tracking(page, tracking_number, timeout_ms=12000):
+            return False
+        content = (await page.content()).lower()
+        if any(
+            phrase in content
+            for phrase in (
+                "tracking number cannot be found",
+                "we couldn't find",
+                "we could not find",
+                "no results found",
+            )
+        ):
+            return False
+        logger.info("FedEx link matched for %s", tracking_number)
+        return True
+    except Exception as exc:
+        logger.debug("FedEx browser probe error for %s: %s", tracking_number, exc)
+        return False
+
+
 async def _probe_estes_browser(page, tracking_number: str) -> bool:
     url = get_tracking_url("estes", tracking_number)
     logger.debug("Probing Estes link: %s", url)
@@ -232,6 +259,7 @@ async def _probe_estes_browser(page, tracking_number: str) -> bool:
 BROWSER_PROBE_FUNCTIONS = {
     "usps": _probe_usps_browser,
     "ups": _probe_ups_browser,
+    "fedex": _probe_fedex_browser,
     "estes": _probe_estes_browser,
 }
 
